@@ -1,18 +1,42 @@
 {
   "name": "pi-memory",
   "version": "0.1.0",
-  "description": "Persistent memory for pi — learns corrections, preferences, and patterns from sessions and injects them into future conversations",
-  "type": "module",
-  "main": "src/index.ts",
+  "description": "Persistent memory for pi — learns corrections, preferences, and patterns from sessions and injects them into future conversations.",
+  "keywords": [
+    "pi-package",
+    "extension",
+    "memory",
+    "learning",
+    "preferences"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/samfoy/pi-memory"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "scripts": {
     "test": "node --test --import tsx src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.48",
     "better-sqlite3": "^11.9.1"
   },
   "devDependencies": {
+    "@sinclair/typebox": "^0.34.48",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.21",
     "tsx": "^4.19.4",

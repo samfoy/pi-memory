@@ -1,15 +1,29 @@
 # pi-memory
 
-Persistent memory extension for [pi](https://github.com/mariozechner/pi-coding-agent). Learns corrections, preferences, and project patterns from sessions and injects them into future conversations.
+Persistent memory for [pi](https://github.com/badlogic/pi-mono). Learns corrections, preferences, and project patterns from sessions and injects them into future conversations.
 
-## What it does
+## Features
 
-- **Remembers** — extracts preferences, project patterns, and corrections from conversations via LLM consolidation
-- **Injects** — automatically adds relevant memory context into every new session's system prompt
-- **Learns** — corrections like "use sed for daily notes, not echo >>" become permanent lessons
+- **Automatic learning** — Extracts preferences, project patterns, and corrections from conversations at session end via LLM consolidation
+- **Context injection** — Automatically adds relevant memory into every new session's system prompt
+- **Corrections stick** — Mistakes you correct once become permanent lessons (e.g. "use sed for daily notes, not echo >>")
 - **Complements session-search** — session-search finds *what you did*, pi-memory remembers *what you learned*
 
-## Memory types
+## Install
+
+```bash
+pi install pi-memory
+```
+
+Or add to `~/.pi/agent/settings.json`:
+
+```json
+{
+  "packages": ["npm:pi-memory"]
+}
+```
+
+## Memory Types
 
 | Type | Key prefix | Example |
 |------|-----------|---------|
@@ -17,7 +31,7 @@ Persistent memory extension for [pi](https://github.com/mariozechner/pi-coding-a
 | Project patterns | `project.*` | `project.rosie.di` → "Dagger dependency injection" |
 | Tool preferences | `tool.*` | `tool.sed` → "use for daily note insertion" |
 | User identity | `user.*` | `user.timezone` → "US/Pacific" |
-| Lessons | (table) | "DON'T: use echo >> for vault notes, use sed" |
+| Lessons | *(table)* | "DON'T: use echo >> for vault notes, use sed" |
 
 ## Tools
 
@@ -35,27 +49,35 @@ Persistent memory extension for [pi](https://github.com/mariozechner/pi-coding-a
 |---------|-------------|
 | `/memory-consolidate` | Manually trigger memory extraction from current session |
 
-## Install
+## How It Works
 
-```bash
-# Clone
-git clone <repo-url> ~/scratch/pi-memory
-cd ~/scratch/pi-memory
-npm install
+1. **`session_start`** — Opens the SQLite store, shows memory stats briefly in the status bar
+2. **`before_agent_start`** — Builds a `<memory>` context block from stored facts and lessons, appends it to the system prompt
+3. **`agent_end`** — Collects conversation messages for later consolidation
+4. **`session_shutdown`** — Runs LLM consolidation (via `pi -p --print`) to extract structured knowledge, then closes the store
 
-# Symlink into pi extensions
-ln -sf ~/scratch/pi-memory ~/.pi/agent/extensions/pi-memory
-```
+### Consolidation
+
+At session end, if there were ≥3 user messages, the extension sends the conversation to an LLM and asks it to extract:
+
+- **Preferences** — coding style, workflow habits, tool choices
+- **Project patterns** — languages, frameworks, architecture decisions
+- **Corrections** — things you corrected, mistakes to avoid
+
+Only facts with confidence ≥ 0.8 are stored. Lessons are deduplicated using exact match and Jaccard similarity (≥ 0.7 threshold).
+
+### Injection
+
+At session start, stored memory is organized into sections (preferences, project context scoped to cwd, tool preferences, lessons, user identity) and injected as a `<memory>` block in the system prompt. The block is capped at 8KB.
 
 ## Storage
 
-SQLite database at `~/.pi/memory/memory.db` (WAL mode).
+SQLite database at `~/.pi/memory/memory.db` (WAL mode). Three tables:
 
-## How it works
+- `semantic` — key-value facts with confidence scores
+- `lessons` — learned corrections with dedup
+- `events` — audit log of all memory operations
 
-1. **`session_start`** — opens the SQLite store
-2. **`before_agent_start`** — builds a `<memory>` context block from stored facts/lessons and appends to system prompt
-3. **`agent_end`** — collects conversation messages
-4. **`session_shutdown`** — runs LLM consolidation to extract new knowledge, then closes store
+## License
 
-Consolidation uses `pi -p --print` to make a lightweight LLM call that extracts structured JSON from the conversation.
+MIT
