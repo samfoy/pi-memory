@@ -42,10 +42,12 @@ export default function (pi: ExtensionAPI) {
   let pendingAssistantMessages: string[] = [];
   let sessionCwd: string = "";
   let sessionId: string | undefined;
+  let cachedCtx: any = null;
 
   // ─── Lifecycle ───────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    cachedCtx = ctx;
     try {
       store = new MemoryStore(DB_PATH);
       sessionCwd = ctx.cwd;
@@ -86,6 +88,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async () => {
     if (!store) return;
+
+    // Immediate visual feedback — user sees this as soon as C-c C-c fires
+    if (cachedCtx) {
+      cachedCtx.ui.setStatus("pi-memory", "🧠 Consolidating memory...");
+    }
 
     // Consolidate if we have enough conversation
     if (pendingUserMessages.length >= 3) {
