@@ -1,10 +1,11 @@
 /**
- * SQLite-backed memory store. Three tables:
+ * SQLite-backed memory store using Node's built-in node:sqlite.
+ * Three tables:
  * - semantic: key-value facts (preferences, project patterns, corrections)
  * - lessons: learned corrections with dedup
  * - events: audit log of all memory operations
  */
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -40,15 +41,15 @@ export interface MemoryEvent {
 // ─── Store ───────────────────────────────────────────────────────────
 
 export class MemoryStore {
-  private db: Database.Database;
+  private db: DatabaseSync;
 
   constructor(dbPath: string) {
     const dir = dirname(dbPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
-    this.db = new Database(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("foreign_keys = ON");
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec("PRAGMA journal_mode = WAL");
+    this.db.exec("PRAGMA foreign_keys = ON");
     this.migrate();
   }
 
@@ -87,7 +88,7 @@ export class MemoryStore {
   // ─── Semantic ────────────────────────────────────────────────────
 
   getSemantic(key: string): SemanticEntry | undefined {
-    return this.db.prepare("SELECT * FROM semantic WHERE key = ?").get(key) as SemanticEntry | undefined;
+    return this.db.prepare("SELECT * FROM semantic WHERE key = ?").get(key) as unknown as SemanticEntry | undefined;
   }
 
   setSemantic(key: string, value: string, confidence: number = 0.8, source: SemanticEntry["source"] = "consolidation"): void {
@@ -116,10 +117,10 @@ export class MemoryStore {
   listSemantic(prefix?: string, limit: number = 100): SemanticEntry[] {
     if (prefix) {
       return this.db.prepare("SELECT * FROM semantic WHERE key LIKE ? ORDER BY updated_at DESC LIMIT ?")
-        .all(`${prefix}%`, limit) as SemanticEntry[];
+        .all(`${prefix}%`, limit) as unknown as SemanticEntry[];
     }
     return this.db.prepare("SELECT * FROM semantic ORDER BY updated_at DESC LIMIT ?")
-      .all(limit) as SemanticEntry[];
+      .all(limit) as unknown as SemanticEntry[];
   }
 
   searchSemantic(query: string, limit: number = 10): SemanticEntry[] {
@@ -127,7 +128,7 @@ export class MemoryStore {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
-    const all = this.db.prepare("SELECT * FROM semantic").all() as SemanticEntry[];
+    const all = this.db.prepare("SELECT * FROM semantic").all() as unknown as SemanticEntry[];
     return all
       .map(entry => {
         const text = `${entry.key} ${entry.value}`.toLowerCase();
@@ -202,7 +203,7 @@ export class MemoryStore {
   }
 
   listEvents(limit: number = 50): MemoryEvent[] {
-    return this.db.prepare("SELECT * FROM events ORDER BY id DESC LIMIT ?").all(limit) as MemoryEvent[];
+    return this.db.prepare("SELECT * FROM events ORDER BY id DESC LIMIT ?").all(limit) as unknown as MemoryEvent[];
   }
 
   // ─── Stats ───────────────────────────────────────────────────────

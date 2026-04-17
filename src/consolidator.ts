@@ -216,6 +216,14 @@ function isDerivableLesson(rule: string): boolean {
   // Pure activity logging — "we fixed X" or "we deployed Y"
   if (/^(we|i|the agent) (fixed|deployed|updated|changed|modified|ran|executed) /.test(rl)) return true;
 
+  // Error→fix recipes — "when error X, run command Y" — these are specific
+  // debugging commands from one session, not generalizable lessons
+  if (/^when (encountering|bash fails|edit fails|.*error)/.test(rl) && /\b(run:|fix with:)/.test(rl)) return true;
+
+  // Literal command sequences — rules that are mostly a shell command
+  if (/^run: /.test(rl)) return true;
+  if (rl.includes("command exited with code") && rl.length < 100) return true;
+
   return false;
 }
 

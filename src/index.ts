@@ -18,7 +18,7 @@
  * - memory_stats: show memory statistics
  */
 import type { ExtensionAPI, AgentToolResult } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type, type TSchema } from "@sinclair/typebox";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { MemoryStore } from "./store.js";
@@ -140,10 +140,16 @@ export default function (pi: ExtensionAPI) {
 
     const prompt = buildConsolidationPrompt(input);
 
-    // Use pi's exec to call the LLM via a lightweight pi session
+    // Use pi's exec to call the LLM via a lightweight pi session.
+    // Use a fast model to avoid blocking shutdown for too long.
     try {
-      const result = await pi.exec("pi", ["-p", prompt, "--print"], {
-        timeout: 60_000,
+      const result = await pi.exec("pi", [
+        "-p", prompt,
+        "--print",
+        "--no-memory",
+        "--model", "claude-sonnet-4-20250514",
+      ], {
+        timeout: 45_000,
         cwd: sessionCwd,
       });
 
@@ -169,7 +175,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
-    }),
+    }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -197,7 +203,7 @@ export default function (pi: ExtensionAPI) {
       rule: Type.Optional(Type.String({ description: "Rule text for lessons" })),
       category: Type.Optional(Type.String({ description: "Category for lessons (default: general)" })),
       negative: Type.Optional(Type.Boolean({ description: "True if this is something to AVOID" })),
-    }),
+    }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -232,7 +238,7 @@ export default function (pi: ExtensionAPI) {
       type: Type.Union([Type.Literal("fact"), Type.Literal("lesson")]),
       key: Type.Optional(Type.String({ description: "Key for facts" })),
       id: Type.Optional(Type.String({ description: "ID for lessons" })),
-    }),
+    }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -257,7 +263,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       category: Type.Optional(Type.String({ description: "Filter by category" })),
       limit: Type.Optional(Type.Number({ description: "Max results (default 50)" })),
-    }),
+    }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -278,7 +284,7 @@ export default function (pi: ExtensionAPI) {
     name: "memory_stats",
     label: "Memory Stats",
     description: "Show memory statistics — how many facts, lessons, and events are stored.",
-    parameters: Type.Object({}),
+    parameters: Type.Object({}) as any,
     async execute(_id, _params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
