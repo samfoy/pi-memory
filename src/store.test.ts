@@ -56,6 +56,42 @@ describe("MemoryStore", () => {
       assert.ok(results.some(r => r.key === "tool.sed"));
     });
 
+    it("FTS5 search: basic query", () => {
+      store.setSemantic("pref.music", "jazz and classical", 0.9, "user");
+      const results = store.searchSemantic("jazz");
+      assert.ok(results.some(r => r.key === "pref.music"));
+    });
+
+    it("FTS5 search: multi-term OR", () => {
+      store.setSemantic("pref.food", "sushi is favorite", 0.9, "user");
+      store.setSemantic("pref.drink", "coffee every morning", 0.9, "user");
+      const results = store.searchSemantic("sushi coffee");
+      assert.ok(results.length >= 2);
+      assert.ok(results.some(r => r.key === "pref.food"));
+      assert.ok(results.some(r => r.key === "pref.drink"));
+    });
+
+    it("FTS5 search: no results for nonsense", () => {
+      const results = store.searchSemantic("xyzzyplugh");
+      assert.equal(results.length, 0);
+    });
+
+    it("FTS5 search: special characters handled safely", () => {
+      // Should not throw — special chars are quoted
+      const results = store.searchSemantic('hello "world" (test)');
+      assert.ok(Array.isArray(results));
+    });
+
+    it("touchAccessed updates last_accessed", () => {
+      store.setSemantic("pref.accessed_test", "some value", 0.9, "user");
+      const before = store.getSemantic("pref.accessed_test");
+      assert.ok(!before!.last_accessed); // initially null
+
+      store.touchAccessed(["pref.accessed_test"]);
+      const after = store.getSemantic("pref.accessed_test");
+      assert.ok(after!.last_accessed);
+    });
+
     it("delete", () => {
       store.setSemantic("pref.temp", "value", 0.8, "user");
       assert.ok(store.getSemantic("pref.temp"));

@@ -54,6 +54,9 @@ function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string): 
   if (results.length > 0) {
     sections.push(formatSection("Relevant Memory", results.map(formatSemantic)));
     semanticCount = results.length;
+
+    // Track access time for these memories
+    store.touchAccessed(results.map(r => r.key));
   }
 
   // Lessons are always injected — they're corrections that apply universally

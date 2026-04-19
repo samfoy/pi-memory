@@ -83,8 +83,39 @@ If nothing worth extracting, return: { "semantic": [], "lessons": [] }`;
 /**
  * Build the consolidation prompt for an LLM call.
  */
-export function buildConsolidationPrompt(input: ConsolidationInput): string {
+export function buildConsolidationPrompt(
+  input: ConsolidationInput,
+  currentFacts?: { key: string; value: string }[],
+  currentLessons?: { rule: string; category: string }[]
+): string {
   const messages: string[] = [];
+
+  // Current memory state section — helps the LLM avoid duplicates
+  let memorySection = "";
+  if ((currentFacts && currentFacts.length > 0) || (currentLessons && currentLessons.length > 0)) {
+    const parts: string[] = ["## Current Memory State"];
+    if (currentFacts && currentFacts.length > 0) {
+      parts.push("The user already has these facts stored (avoid duplicating, update if changed):");
+      let chars = 0;
+      for (const f of currentFacts) {
+        const line = `- ${f.key}: ${f.value.length > 120 ? f.value.slice(0, 120) + "…" : f.value}`;
+        if (chars + line.length > 1500) { parts.push("- ... (truncated)"); break; }
+        parts.push(line);
+        chars += line.length;
+      }
+    }
+    if (currentLessons && currentLessons.length > 0) {
+      parts.push("\nAnd these lessons (avoid duplicating):");
+      let chars = 0;
+      for (const l of currentLessons) {
+        const line = `- [${l.category}] ${l.rule.length > 120 ? l.rule.slice(0, 120) + "…" : l.rule}`;
+        if (chars + line.length > 500) { parts.push("- ... (truncated)"); break; }
+        parts.push(line);
+        chars += line.length;
+      }
+    }
+    memorySection = parts.join("\n") + "\n\n";
+  }
 
   // Interleave user/assistant messages for context
   const maxPairs = 30; // cap to avoid huge prompts
@@ -98,7 +129,7 @@ export function buildConsolidationPrompt(input: ConsolidationInput): string {
 
   return `${CONSOLIDATION_PROMPT}
 
-${input.cwd ? `Working directory: ${input.cwd}\n` : ""}
+${memorySection}${input.cwd ? `Working directory: ${input.cwd}\n` : ""}
 ## Conversation
 
 ${messages.join("\n\n")}`;
@@ -168,10 +199,10 @@ export function applyExtracted(store: MemoryStore, extracted: ExtractedMemory, s
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-const VALID_KEY_RE = /^(pref|project|user|tool|lesson)\.[a-z0-9._-]+$/;
+const VALID_KEY_RE = /^[a-z][a-z0-9._-]*$/;
 
 function isValidKey(key: string): boolean {
-  return VALID_KEY_RE.test(key) && key.length <= 100;
+  return VALID_KEY_RE.test(key) && key.length <= 100 && key.length >= 2;
 }
 
 /**

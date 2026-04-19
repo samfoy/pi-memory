@@ -18,6 +18,7 @@ export interface SemanticEntry {
   source: "user" | "consolidation" | "correction";
   created_at: string;
   updated_at: string;
+  last_accessed?: string;
 }
 
 export interface LessonEntry {
@@ -85,6 +86,32 @@ export class MemoryStore {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+
+    // Migration: add last_accessed column if missing
+    try {
+      this.db.exec(`ALTER TABLE semantic ADD COLUMN last_accessed TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
+
+    // FTS5 virtual table for semantic search
+    this.db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts USING fts5(key, value, content='semantic', content_rowid='rowid');
+
+      CREATE TRIGGER IF NOT EXISTS semantic_ai AFTER INSERT ON semantic BEGIN
+        INSERT INTO semantic_fts(rowid, key, value) VALUES (new.rowid, new.key, new.value);
+      END;
+      CREATE TRIGGER IF NOT EXISTS semantic_ad AFTER DELETE ON semantic BEGIN
+        INSERT INTO semantic_fts(semantic_fts, rowid, key, value) VALUES('delete', old.rowid, old.key, old.value);
+      END;
+      CREATE TRIGGER IF NOT EXISTS semantic_au AFTER UPDATE ON semantic BEGIN
+        INSERT INTO semantic_fts(semantic_fts, rowid, key, value) VALUES('delete', old.rowid, old.key, old.value);
+        INSERT INTO semantic_fts(rowid, key, value) VALUES (new.rowid, new.key, new.value);
+      END;
+    `);
+
+    // Rebuild FTS index from existing data (idempotent)
+    this.db.exec(`INSERT INTO semantic_fts(semantic_fts) VALUES('rebuild')`);
   }
 
   /**
@@ -151,7 +178,30 @@ export class MemoryStore {
   }
 
   searchSemantic(query: string, limit: number = 10): SemanticEntry[] {
-    // Keyword search — match against key and value
+    const terms = query.trim().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return [];
+
+    // Build FTS5 query — quote each term for safety
+    const ftsQuery = terms.map(t => `"${t.replace(/"/g, '""')}"`).join(" OR ");
+
+    try {
+      const rows = this.db.prepare(`
+        SELECT s.key, s.value, s.confidence, s.source, s.created_at, s.updated_at, s.last_accessed
+        FROM semantic s
+        JOIN semantic_fts fts ON s.rowid = fts.rowid
+        WHERE semantic_fts MATCH ?
+        ORDER BY bm25(semantic_fts)
+        LIMIT ?
+      `).all(ftsQuery, limit) as unknown as SemanticEntry[];
+
+      return rows;
+    } catch {
+      // FTS query failed — fall back to substring matching
+      return this._searchSemanticFallback(query, limit);
+    }
+  }
+
+  private _searchSemanticFallback(query: string, limit: number): SemanticEntry[] {
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return [];
 
@@ -166,6 +216,14 @@ export class MemoryStore {
       .sort((a, b) => b.score - a.score)
       .slice(0, limit)
       .map(({ entry }) => entry);
+  }
+
+  touchAccessed(keys: string[]): void {
+    if (keys.length === 0) return;
+    const stmt = this.db.prepare("UPDATE semantic SET last_accessed = datetime('now') WHERE key = ?");
+    for (const key of keys) {
+      stmt.run(key.toLowerCase());
+    }
   }
 
   // ─── Lessons ─────────────────────────────────────────────────────

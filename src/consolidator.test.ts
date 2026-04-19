@@ -34,6 +34,38 @@ describe("buildConsolidationPrompt", () => {
     const userCount = (prompt.match(/User: msg/g) || []).length;
     assert.ok(userCount <= 30);
   });
+
+  it("includes current facts in prompt", () => {
+    const prompt = buildConsolidationPrompt(
+      { userMessages: ["hello"], assistantMessages: ["hi"] },
+      [{ key: "pref.editor", value: "vim" }, { key: "wife", value: "Eryn" }],
+      []
+    );
+    assert.ok(prompt.includes("Current Memory State"));
+    assert.ok(prompt.includes("pref.editor: vim"));
+    assert.ok(prompt.includes("wife: Eryn"));
+  });
+
+  it("includes current lessons in prompt", () => {
+    const prompt = buildConsolidationPrompt(
+      { userMessages: ["hello"], assistantMessages: ["hi"] },
+      [],
+      [{ rule: "Never hardcode secrets", category: "security" }]
+    );
+    assert.ok(prompt.includes("And these lessons"));
+    assert.ok(prompt.includes("[security] Never hardcode secrets"));
+  });
+
+  it("truncates long values in memory state", () => {
+    const longValue = "x".repeat(300);
+    const prompt = buildConsolidationPrompt(
+      { userMessages: ["hello"], assistantMessages: ["hi"] },
+      [{ key: "test.long", value: longValue }],
+      []
+    );
+    assert.ok(prompt.includes("\u2026")); // truncation indicator
+    assert.ok(!prompt.includes(longValue)); // full value not present
+  });
 });
 
 describe("parseConsolidationResponse", () => {
@@ -77,9 +109,22 @@ describe("parseConsolidationResponse", () => {
     assert.equal(result.semantic.length, 0);
   });
 
-  it("rejects unknown key prefix", () => {
+  it("accepts flexible key prefixes like family, health, config", () => {
     const result = parseConsolidationResponse(JSON.stringify({
-      semantic: [{ key: "secret.password", value: "hunter2", confidence: 0.99 }],
+      semantic: [
+        { key: "family.brother", value: "Joe", confidence: 0.95 },
+        { key: "health.allergy", value: "penicillin", confidence: 0.9 },
+        { key: "config.theme", value: "dark", confidence: 0.9 },
+        { key: "wife", value: "Eryn", confidence: 0.95 },
+      ],
+      lessons: [],
+    }));
+    assert.equal(result.semantic.length, 4);
+  });
+
+  it("rejects single-char keys", () => {
+    const result = parseConsolidationResponse(JSON.stringify({
+      semantic: [{ key: "x", value: "too short", confidence: 0.9 }],
       lessons: [],
     }));
     assert.equal(result.semantic.length, 0);

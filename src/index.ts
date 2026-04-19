@@ -145,7 +145,9 @@ export default function (pi: ExtensionAPI) {
       sessionId,
     };
 
-    const prompt = buildConsolidationPrompt(input);
+    const currentFacts = store.listSemantic(undefined, 200).map(f => ({ key: f.key, value: f.value }));
+    const currentLessons = store.listLessons(undefined, 100).map(l => ({ rule: l.rule, category: l.category }));
+    const prompt = buildConsolidationPrompt(input, currentFacts, currentLessons);
 
     // Use pi's exec to call the LLM via a lightweight pi session.
     // Use a fast model to avoid blocking shutdown for too long.
