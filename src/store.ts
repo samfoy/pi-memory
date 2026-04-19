@@ -42,6 +42,7 @@ export interface MemoryEvent {
 
 export class MemoryStore {
   private db: DatabaseSync;
+  private writeLock: Promise<void> = Promise.resolve();
 
   constructor(dbPath: string) {
     const dir = dirname(dbPath);
@@ -86,33 +87,58 @@ export class MemoryStore {
     `);
   }
 
+  /**
+   * Serialize async callers so concurrent read-modify-write cycles
+   * (e.g. two consolidation calls) don't clobber each other.
+   */
+  private withLock<T>(fn: () => T): T {
+    // DatabaseSync is synchronous, so we just need to ensure
+    // transactional integrity. Wrap in a SQLite transaction.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = fn();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (err) {
+      this.db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   // ─── Semantic ────────────────────────────────────────────────────
 
   getSemantic(key: string): SemanticEntry | undefined {
-    return this.db.prepare("SELECT * FROM semantic WHERE key = ?").get(key) as unknown as SemanticEntry | undefined;
+    const normalized = key.toLowerCase();
+    return this.db.prepare("SELECT * FROM semantic WHERE key = ?").get(normalized) as unknown as SemanticEntry | undefined;
   }
 
   setSemantic(key: string, value: string, confidence: number = 0.8, source: SemanticEntry["source"] = "consolidation"): void {
-    const existing = this.getSemantic(key);
-    if (existing && existing.confidence > confidence) return; // higher confidence wins
+    const normalized = key.toLowerCase();
+    this.withLock(() => {
+      const existing = this.db.prepare("SELECT * FROM semantic WHERE key = ?").get(normalized) as unknown as SemanticEntry | undefined;
+      if (existing && existing.confidence > confidence) return; // higher confidence wins
 
-    this.db.prepare(`
-      INSERT INTO semantic (key, value, confidence, source, updated_at)
-      VALUES (?, ?, ?, ?, datetime('now'))
-      ON CONFLICT(key) DO UPDATE SET
-        value = excluded.value,
-        confidence = excluded.confidence,
-        source = excluded.source,
-        updated_at = datetime('now')
-    `).run(key, value, confidence, source);
+      this.db.prepare(`
+        INSERT INTO semantic (key, value, confidence, source, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          confidence = excluded.confidence,
+          source = excluded.source,
+          updated_at = datetime('now')
+      `).run(normalized, value, confidence, source);
 
-    this.logEvent(existing ? "update" : "create", "semantic", key);
+      this.logEvent(existing ? "update" : "create", "semantic", normalized);
+    });
   }
 
   deleteSemantic(key: string): boolean {
-    const result = this.db.prepare("DELETE FROM semantic WHERE key = ?").run(key);
-    if (result.changes > 0) this.logEvent("delete", "semantic", key);
-    return result.changes > 0;
+    const normalized = key.toLowerCase();
+    return this.withLock(() => {
+      const result = this.db.prepare("DELETE FROM semantic WHERE key = ?").run(normalized);
+      if (result.changes > 0) this.logEvent("delete", "semantic", normalized);
+      return result.changes > 0;
+    });
   }
 
   listSemantic(prefix?: string, limit: number = 100): SemanticEntry[] {
@@ -148,27 +174,31 @@ export class MemoryStore {
     const trimmed = rule.trim();
     if (!trimmed) return { success: false, reason: "empty rule" };
 
-    // Exact-match dedup (case-insensitive)
-    const existing = this.db.prepare(
-      "SELECT id FROM lessons WHERE LOWER(TRIM(rule)) = LOWER(?) AND is_deleted = 0"
-    ).get(trimmed.toLowerCase()) as { id: string } | undefined;
-    if (existing) return { success: false, reason: "duplicate", id: existing.id };
+    const normalizedCategory = category.trim().toLowerCase() || "general";
 
-    // Jaccard dedup
-    const allRules = this.db.prepare("SELECT id, rule FROM lessons WHERE is_deleted = 0").all() as { id: string; rule: string }[];
-    for (const r of allRules) {
-      if (jaccard(trimmed, r.rule) >= 0.7) {
-        return { success: false, reason: "similar", id: r.id };
+    return this.withLock(() => {
+      // Exact-match dedup (case-insensitive)
+      const existing = this.db.prepare(
+        "SELECT id FROM lessons WHERE LOWER(TRIM(rule)) = LOWER(?) AND is_deleted = 0"
+      ).get(trimmed.toLowerCase()) as { id: string } | undefined;
+      if (existing) return { success: false as const, reason: "duplicate" as const, id: existing.id };
+
+      // Jaccard dedup
+      const allRules = this.db.prepare("SELECT id, rule FROM lessons WHERE is_deleted = 0").all() as { id: string; rule: string }[];
+      for (const r of allRules) {
+        if (jaccard(trimmed, r.rule) >= 0.7) {
+          return { success: false as const, reason: "similar" as const, id: r.id };
+        }
       }
-    }
 
-    const id = crypto.randomUUID();
-    this.db.prepare(
-      "INSERT INTO lessons (id, rule, category, source, negative) VALUES (?, ?, ?, ?, ?)"
-    ).run(id, trimmed, category, source, negative ? 1 : 0);
+      const id = crypto.randomUUID();
+      this.db.prepare(
+        "INSERT INTO lessons (id, rule, category, source, negative) VALUES (?, ?, ?, ?, ?)"
+      ).run(id, trimmed, normalizedCategory, source, negative ? 1 : 0);
 
-    this.logEvent("create", "lesson", id, trimmed.slice(0, 100));
-    return { success: true, id };
+      this.logEvent("create", "lesson", id, trimmed.slice(0, 100));
+      return { success: true as const, id };
+    });
   }
 
   getLesson(id: string): LessonEntry | undefined {
@@ -180,8 +210,9 @@ export class MemoryStore {
   listLessons(category?: string, limit: number = 50): LessonEntry[] {
     let rows: any[];
     if (category) {
+      const normalizedCategory = category.trim().toLowerCase();
       rows = this.db.prepare("SELECT * FROM lessons WHERE category = ? AND is_deleted = 0 ORDER BY created_at DESC LIMIT ?")
-        .all(category, limit);
+        .all(normalizedCategory, limit);
     } else {
       rows = this.db.prepare("SELECT * FROM lessons WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT ?")
         .all(limit);
@@ -190,19 +221,21 @@ export class MemoryStore {
   }
 
   deleteLesson(id: string): boolean {
-    // Support both full UUIDs and prefix matches (e.g. first 8 chars)
-    let result = this.db.prepare("UPDATE lessons SET is_deleted = 1 WHERE id = ? AND is_deleted = 0").run(id);
-    if (result.changes === 0 && id.length < 36) {
-      // Try prefix match — ensure it's unambiguous
-      const matches = this.db.prepare("SELECT id FROM lessons WHERE id LIKE ? AND is_deleted = 0").all(`${id}%`) as { id: string }[];
-      if (matches.length === 1) {
-        result = this.db.prepare("UPDATE lessons SET is_deleted = 1 WHERE id = ? AND is_deleted = 0").run(matches[0].id);
-        if (result.changes > 0) this.logEvent("delete", "lesson", matches[0].id);
-        return true;
+    return this.withLock(() => {
+      // Support both full UUIDs and prefix matches (e.g. first 8 chars)
+      let result = this.db.prepare("UPDATE lessons SET is_deleted = 1 WHERE id = ? AND is_deleted = 0").run(id);
+      if (result.changes === 0 && id.length < 36) {
+        // Try prefix match — ensure it's unambiguous
+        const matches = this.db.prepare("SELECT id FROM lessons WHERE id LIKE ? AND is_deleted = 0").all(`${id}%`) as { id: string }[];
+        if (matches.length === 1) {
+          result = this.db.prepare("UPDATE lessons SET is_deleted = 1 WHERE id = ? AND is_deleted = 0").run(matches[0].id);
+          if (result.changes > 0) this.logEvent("delete", "lesson", matches[0].id);
+          return true;
+        }
       }
-    }
-    if (result.changes > 0) this.logEvent("delete", "lesson", id);
-    return result.changes > 0;
+      if (result.changes > 0) this.logEvent("delete", "lesson", id);
+      return result.changes > 0;
+    });
   }
 
   // ─── Events ──────────────────────────────────────────────────────
