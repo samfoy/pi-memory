@@ -34,9 +34,32 @@ import {
   type ConsolidationInput,
 } from "./consolidator.js";
 
-const MEMORY_DIR = join(homedir(), ".pi", "memory");
-const DB_PATH = join(MEMORY_DIR, "memory.db");
+const DEFAULT_MEMORY_DIR = join(homedir(), ".pi", "memory");
+const DEFAULT_DB_PATH = join(DEFAULT_MEMORY_DIR, "memory.db");
 const GLOBAL_SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
+
+/**
+ * Resolve the memory DB path for a given working directory.
+ * Priority:
+ *   1. "pi-memory".localPath from {cwd}/.pi/settings.json → join(localPath, "memory.db")
+ *   2. {cwd}/.pi/memory/memory.db  (per-agent local default)
+ */
+function resolveDbPath(cwd: string): string {
+  // Try reading the local project settings first
+  try {
+    const localSettingsPath = join(cwd, ".pi", "settings.json");
+    const raw = readFileSync(localSettingsPath, "utf-8");
+    const settings = JSON.parse(raw);
+    const piMemory = settings?.["pi-memory"];
+    if (piMemory && typeof piMemory === "object" && typeof piMemory.localPath === "string" && piMemory.localPath) {
+      return join(piMemory.localPath, "memory.db");
+    }
+  } catch {
+    // No local settings or parse error — continue to default
+  }
+  // Default: per-agent local memory
+  return join(cwd, ".pi", "memory", "memory.db");
+}
 
 /**
  * Read pi-memory config from settings.json.
@@ -49,21 +72,40 @@ const GLOBAL_SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
  *   }
  * }
  */
-function readSettingsConfig(): InjectorConfig {
+function readSettingsConfig(cwd?: string): InjectorConfig {
+  const config: InjectorConfig = {};
+
+  // Read global settings
   try {
     const raw = readFileSync(GLOBAL_SETTINGS_PATH, "utf-8");
     const settings = JSON.parse(raw);
     const memorySettings = settings?.memory;
-    if (!memorySettings || typeof memorySettings !== "object") return {};
-
-    const config: InjectorConfig = {};
-    if (memorySettings.lessonInjection === "all" || memorySettings.lessonInjection === "selective") {
-      config.lessonInjection = memorySettings.lessonInjection;
+    if (memorySettings && typeof memorySettings === "object") {
+      if (memorySettings.lessonInjection === "all" || memorySettings.lessonInjection === "selective") {
+        config.lessonInjection = memorySettings.lessonInjection;
+      }
     }
-    return config;
   } catch {
-    return {};
+    // no global settings
   }
+
+  // Override with local project settings if available
+  if (cwd) {
+    try {
+      const raw = readFileSync(join(cwd, ".pi", "settings.json"), "utf-8");
+      const settings = JSON.parse(raw);
+      const memorySettings = settings?.memory ?? settings?.["pi-memory"];
+      if (memorySettings && typeof memorySettings === "object") {
+        if (memorySettings.lessonInjection === "all" || memorySettings.lessonInjection === "selective") {
+          config.lessonInjection = memorySettings.lessonInjection;
+        }
+      }
+    } catch {
+      // no local settings
+    }
+  }
+
+  return config;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -73,16 +115,22 @@ export default function (pi: ExtensionAPI) {
   let sessionCwd: string = "";
   let sessionId: string | undefined;
   let cachedCtx: any = null;
+  let resolvedDbPath: string = DEFAULT_DB_PATH;
   let injectorConfig: InjectorConfig = readSettingsConfig();
 
   // ─── Lifecycle ───────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
     try {
-      store = new MemoryStore(DB_PATH);
       sessionCwd = ctx.cwd;
       cachedCtx = ctx;
       sessionId = (ctx as any).sessionId ?? (ctx as any).session?.id;
+
+      // Resolve per-agent DB path from local settings or cwd
+      resolvedDbPath = resolveDbPath(sessionCwd);
+      injectorConfig = readSettingsConfig(sessionCwd);
+
+      store = new MemoryStore(resolvedDbPath);
 
       const stats = store.stats();
       if (stats.semantic + stats.lessons > 0) {
@@ -329,7 +377,7 @@ export default function (pi: ExtensionAPI) {
       if (!store) return ok("Memory store not initialized");
 
       const stats = store.stats();
-      const text = `Memory: ${stats.semantic} semantic facts, ${stats.lessons} active lessons, ${stats.events} events logged\nDB: ${DB_PATH}`;
+      const text = `Memory: ${stats.semantic} semantic facts, ${stats.lessons} active lessons, ${stats.events} events logged\nDB: ${resolvedDbPath}`;
       return ok(text);
     },
   });
