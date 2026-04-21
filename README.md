@@ -70,6 +70,30 @@ Only facts with confidence ≥ 0.8 are stored. Lessons are deduplicated using ex
 
 At session start, stored memory is organized into sections (preferences, project context scoped to cwd, tool preferences, lessons, user identity) and injected as a `<memory>` block in the system prompt. The block is capped at 8KB.
 
+**Selective lesson injection** — By default, all lessons are injected into every session. When you have many lessons across different domains, this can waste context. Enable selective mode to filter lessons by relevance:
+
+```json
+{
+  "memory": {
+    "lessonInjection": "selective"
+  }
+}
+```
+
+Add this to `~/.pi/agent/settings.json`. In selective mode, lessons are filtered by:
+
+1. **Prompt relevance** — FTS search against the user's first message
+2. **Project context** — lessons matching the current working directory's project
+3. **Category inference** — keywords in the prompt trigger relevant categories (e.g. "pentest" pulls in `bug-bounty` lessons, "blog post" pulls in `writing` lessons)
+4. **General lessons** — always included regardless of prompt
+
+The result is capped at 15 most relevant lessons instead of all of them.
+
+| Mode | Behavior |
+|------|----------|
+| `"all"` (default) | Every lesson injected into every session |
+| `"selective"` | Only relevant lessons based on prompt, project, and category |
+
 ## Storage
 
 SQLite database at `~/.pi/memory/memory.db` (WAL mode). Three tables:
