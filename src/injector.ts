@@ -6,10 +6,11 @@
  *   to the user's current prompt, plus always-inject lessons.
  * - Fallback (no prompt): dump top entries by prefix (old behavior).
  */
-import type { MemoryStore, SemanticEntry } from "./store.js";
+import type { MemoryStore, SemanticEntry, LessonEntry } from "./store.js";
 
 const MAX_CONTEXT_CHARS = 8000;
 const SEARCH_LIMIT = 15;
+const LESSON_SEARCH_LIMIT = 15;
 
 export interface ContextBlock {
   text: string;
@@ -17,22 +18,34 @@ export interface ContextBlock {
 }
 
 /**
+ * Configuration for lesson injection behavior.
+ * - "all": inject all lessons (original behavior, default)
+ * - "selective": use semantic search to pick relevant lessons + category filtering
+ */
+export type LessonInjectionMode = "all" | "selective";
+
+export interface InjectorConfig {
+  lessonInjection?: LessonInjectionMode;
+}
+
+/**
  * Build context block. When `prompt` is provided, uses selective injection
  * (search-based). Otherwise falls back to prefix-based dump.
  */
-export function buildContextBlock(store: MemoryStore, cwd?: string, prompt?: string): ContextBlock {
+export function buildContextBlock(store: MemoryStore, cwd?: string, prompt?: string, config?: InjectorConfig): ContextBlock {
   if (prompt?.trim()) {
-    return buildSelectiveBlock(store, prompt, cwd);
+    return buildSelectiveBlock(store, prompt, cwd, config);
   }
   return buildFallbackBlock(store, cwd);
 }
 
 // ─── Selective injection ─────────────────────────────────────────────
 
-function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string): ContextBlock {
+function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string, config?: InjectorConfig): ContextBlock {
   const sections: string[] = [];
   let semanticCount = 0;
   let lessonCount = 0;
+  const mode = config?.lessonInjection ?? "all";
 
   // Search semantic memory using the user's prompt
   const results = store.searchSemantic(prompt, SEARCH_LIMIT);
@@ -59,8 +72,11 @@ function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string): 
     store.touchAccessed(results.map(r => r.key));
   }
 
-  // Lessons are always injected — they're corrections that apply universally
-  const lessons = store.listLessons(undefined, 50);
+  // Inject lessons — either all or filtered by relevance
+  const lessons = mode === "selective"
+    ? getRelevantLessons(store, prompt, cwd)
+    : store.listLessons(undefined, 50);
+
   if (lessons.length > 0) {
     const corrections = lessons.filter(l => l.negative);
     const positives = lessons.filter(l => !l.negative);
@@ -91,6 +107,74 @@ function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string): 
   }
 
   return { text, stats: { semantic: semanticCount, lessons: lessonCount } };
+}
+
+// ─── Selective lesson injection ──────────────────────────────────────
+
+/**
+ * Get lessons relevant to the current prompt + project context.
+ *
+ * Strategy:
+ * 1. Search lessons by prompt terms (semantic/FTS match)
+ * 2. If cwd implies a project, also search by project slug
+ * 3. Infer likely categories from the prompt and include those
+ * 4. Always include "general" category lessons (up to a cap)
+ * 5. Dedup and cap at LESSON_SEARCH_LIMIT
+ */
+function getRelevantLessons(store: MemoryStore, prompt: string, cwd?: string): LessonEntry[] {
+  const seen = new Set<string>();
+  const result: LessonEntry[] = [];
+
+  function add(lessons: LessonEntry[]) {
+    for (const l of lessons) {
+      if (!seen.has(l.id)) {
+        seen.add(l.id);
+        result.push(l);
+      }
+    }
+  }
+
+  // 1. Search by prompt relevance
+  add(store.searchLessons(prompt, LESSON_SEARCH_LIMIT));
+
+  // 2. Search by project slug if we have a cwd
+  const slug = cwd ? projectSlug(cwd) : "";
+  if (slug) {
+    add(store.searchLessons(slug, 5));
+  }
+
+  // 3. Infer categories from prompt and pull matching lessons
+  const categories = inferCategories(prompt);
+  for (const cat of categories) {
+    add(store.listLessons(cat, 10));
+  }
+
+  // 4. Always include general lessons (they're broadly applicable)
+  add(store.listLessons("general", 10));
+
+  return result.slice(0, LESSON_SEARCH_LIMIT);
+}
+
+/**
+ * Infer likely lesson categories from the prompt text.
+ * Maps common keywords/topics to known category names.
+ */
+const CATEGORY_SIGNALS: Record<string, string[]> = {
+  "bug-bounty": ["bounty", "pentest", "recon", "vuln", "exploit", "h1", "hackerone", "intigriti", "bbp", "security", "cve", "xss", "sqli", "idor", "csrf", "ssrf"],
+  "writing": ["blog", "write", "article", "post", "draft", "publish", "circuit-break", "readme"],
+  "subagent": ["subagent", "background", "spawn", "parallel"],
+  "pi-dashboard": ["dashboard", "pi-dashboard", "chat slot"],
+};
+
+function inferCategories(prompt: string): string[] {
+  const lower = prompt.toLowerCase();
+  const matched: string[] = [];
+  for (const [category, signals] of Object.entries(CATEGORY_SIGNALS)) {
+    if (signals.some(s => lower.includes(s))) {
+      matched.push(category);
+    }
+  }
+  return matched;
 }
 
 // ─── Fallback (no prompt) ────────────────────────────────────────────

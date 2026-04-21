@@ -76,6 +76,29 @@ describe("buildContextBlock", () => {
     assert.ok(text.includes("DON'T:"));
   });
 
+  it("selective: filters lessons by relevance when config is selective", () => {
+    // Add lessons in different categories
+    store.addLesson("Always verify exploit PoC before submission", "bug-bounty", "user", false);
+    store.addLesson("Use conventional commits for all projects", "general", "user", false);
+    store.addLesson("Never fabricate competitor claims in blog posts", "writing", "user", true);
+
+    // With selective mode and a bug bounty prompt, should get bug-bounty + general lessons
+    const { text: bbText } = buildContextBlock(store, undefined, "run a pentest on the target", { lessonInjection: "selective" });
+    assert.ok(bbText.includes("verify exploit"), "should include bug-bounty lesson for pentest prompt");
+    assert.ok(bbText.includes("conventional commits"), "should include general lessons");
+
+    // With selective mode and a writing prompt, should get writing + general lessons
+    const { text: writeText } = buildContextBlock(store, undefined, "write a blog post about testing", { lessonInjection: "selective" });
+    assert.ok(writeText.includes("fabricate"), "should include writing lesson for blog prompt");
+    assert.ok(writeText.includes("conventional commits"), "should include general lessons");
+  });
+
+  it("selective: mode 'all' still includes all lessons", () => {
+    const { text } = buildContextBlock(store, undefined, "something totally unrelated xyz", { lessonInjection: "all" });
+    assert.ok(text.includes("Learned Corrections"));
+    assert.ok(text.includes("DON'T:"));
+  });
+
   it("selective: includes project context when cwd matches", () => {
     const { text } = buildContextBlock(store, "/workplace/samfp/Rosie", "how do I build");
     // Should find rosie entries via project slug search

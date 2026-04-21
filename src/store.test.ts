@@ -147,6 +147,20 @@ describe("MemoryStore", () => {
       assert.ok(lesson);
       assert.equal(lesson.negative, true);
     });
+
+    it("searchLessons by keyword", () => {
+      store.addLesson("Always verify exploit PoC before report submission", "bug-bounty", "user", false);
+      store.addLesson("Use conventional commits for all repos", "general", "user", false);
+
+      const results = store.searchLessons("exploit PoC", 10);
+      assert.ok(results.length > 0);
+      assert.ok(results.some(r => r.rule.includes("exploit")));
+    });
+
+    it("searchLessons returns empty for nonsense", () => {
+      const results = store.searchLessons("xyzzy12345 qqqqq", 10);
+      assert.equal(results.length, 0);
+    });
   });
 
   describe("events", () => {

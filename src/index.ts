@@ -21,8 +21,9 @@ import type { ExtensionAPI, AgentToolResult } from "@mariozechner/pi-coding-agen
 import { Type, type TSchema } from "@sinclair/typebox";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
 import { MemoryStore } from "./store.js";
-import { buildContextBlock } from "./injector.js";
+import { buildContextBlock, type InjectorConfig } from "./injector.js";
 
 type ToolResult = AgentToolResult<unknown>;
 function ok(text: string): ToolResult { return { content: [{ type: "text", text }], details: {} }; }
@@ -35,6 +36,35 @@ import {
 
 const MEMORY_DIR = join(homedir(), ".pi", "memory");
 const DB_PATH = join(MEMORY_DIR, "memory.db");
+const GLOBAL_SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
+
+/**
+ * Read pi-memory config from settings.json.
+ * Looks for a "memory" key with extension-specific settings.
+ *
+ * Example settings.json:
+ * {
+ *   "memory": {
+ *     "lessonInjection": "selective"
+ *   }
+ * }
+ */
+function readSettingsConfig(): InjectorConfig {
+  try {
+    const raw = readFileSync(GLOBAL_SETTINGS_PATH, "utf-8");
+    const settings = JSON.parse(raw);
+    const memorySettings = settings?.memory;
+    if (!memorySettings || typeof memorySettings !== "object") return {};
+
+    const config: InjectorConfig = {};
+    if (memorySettings.lessonInjection === "all" || memorySettings.lessonInjection === "selective") {
+      config.lessonInjection = memorySettings.lessonInjection;
+    }
+    return config;
+  } catch {
+    return {};
+  }
+}
 
 export default function (pi: ExtensionAPI) {
   let store: MemoryStore | null = null;
@@ -43,6 +73,7 @@ export default function (pi: ExtensionAPI) {
   let sessionCwd: string = "";
   let sessionId: string | undefined;
   let cachedCtx: any = null;
+  let injectorConfig: InjectorConfig = readSettingsConfig();
 
   // ─── Lifecycle ───────────────────────────────────────────────────
 
@@ -66,7 +97,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     if (!store) return;
 
-    const { text } = buildContextBlock(store, ctx.cwd, event.prompt);
+    const { text } = buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
     if (!text) return;
 
     return {

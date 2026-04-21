@@ -95,7 +95,7 @@ export class MemoryStore {
       // Column already exists — ignore
     }
 
-    // FTS5 virtual table for semantic search (optional — node:sqlite may lack FTS5)
+    // FTS5 virtual tables for semantic + lesson search (optional — node:sqlite may lack FTS5)
     try {
       this.db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts USING fts5(key, value, content='semantic', content_rowid='rowid');
@@ -112,8 +112,24 @@ export class MemoryStore {
         END;
       `);
 
-      // Rebuild FTS index from existing data (idempotent)
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(rule, category, content='lessons', content_rowid='rowid');
+
+        CREATE TRIGGER IF NOT EXISTS lessons_fts_ai AFTER INSERT ON lessons BEGIN
+          INSERT INTO lessons_fts(rowid, rule, category) VALUES (new.rowid, new.rule, new.category);
+        END;
+        CREATE TRIGGER IF NOT EXISTS lessons_fts_ad AFTER DELETE ON lessons BEGIN
+          INSERT INTO lessons_fts(lessons_fts, rowid, rule, category) VALUES('delete', old.rowid, old.rule, old.category);
+        END;
+        CREATE TRIGGER IF NOT EXISTS lessons_fts_au AFTER UPDATE ON lessons BEGIN
+          INSERT INTO lessons_fts(lessons_fts, rowid, rule, category) VALUES('delete', old.rowid, old.rule, old.category);
+          INSERT INTO lessons_fts(rowid, rule, category) VALUES (new.rowid, new.rule, new.category);
+        END;
+      `);
+
+      // Rebuild FTS indexes from existing data (idempotent)
       this.db.exec(`INSERT INTO semantic_fts(semantic_fts) VALUES('rebuild')`);
+      this.db.exec(`INSERT INTO lessons_fts(lessons_fts) VALUES('rebuild')`);
       this.hasFTS5 = true;
     } catch {
       // FTS5 not available (node:sqlite compiled without SQLITE_ENABLE_FTS5).
@@ -286,6 +302,51 @@ export class MemoryStore {
         .all(limit);
     }
     return rows.map(r => ({ ...r, negative: !!r.negative }));
+  }
+
+  /**
+   * Search lessons by relevance to a query. Uses FTS5 when available,
+   * falls back to substring matching. Returns lessons ranked by relevance.
+   */
+  searchLessons(query: string, limit: number = 20): LessonEntry[] {
+    const terms = query.trim().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return [];
+
+    if (!this.hasFTS5) return this._searchLessonsFallback(query, limit);
+
+    const ftsQuery = terms.map(t => `"${t.replace(/"/g, '""')}"`).join(" OR ");
+
+    try {
+      const rows = this.db.prepare(`
+        SELECT l.id, l.rule, l.category, l.source, l.negative, l.created_at
+        FROM lessons l
+        JOIN lessons_fts fts ON l.rowid = fts.rowid
+        WHERE lessons_fts MATCH ? AND l.is_deleted = 0
+        ORDER BY bm25(lessons_fts)
+        LIMIT ?
+      `).all(ftsQuery, limit) as any[];
+
+      return rows.map(r => ({ ...r, negative: !!r.negative }));
+    } catch {
+      return this._searchLessonsFallback(query, limit);
+    }
+  }
+
+  private _searchLessonsFallback(query: string, limit: number): LessonEntry[] {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return [];
+
+    const all = this.db.prepare("SELECT * FROM lessons WHERE is_deleted = 0").all() as any[];
+    return all
+      .map(entry => {
+        const text = `${entry.rule} ${entry.category}`.toLowerCase();
+        const matches = terms.filter(t => text.includes(t)).length;
+        return { entry: { ...entry, negative: !!entry.negative } as LessonEntry, score: matches / terms.length };
+      })
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(({ entry }) => entry);
   }
 
   deleteLesson(id: string): boolean {
