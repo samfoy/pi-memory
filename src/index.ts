@@ -132,6 +132,29 @@ export default function (pi: ExtensionAPI) {
 
       store = new MemoryStore(resolvedDbPath);
 
+      // Seed pending messages from existing session history so that
+      // /memory-consolidate works even when resuming a session (the
+      // historical messages never fire agent_end).  See #5.
+      pendingUserMessages = [];
+      pendingAssistantMessages = [];
+      try {
+        const branch = ctx.sessionManager.getBranch();
+        for (const entry of branch) {
+          if (entry.type !== "message") continue;
+          const msg = (entry as any).message;
+          if (!msg) continue;
+          if (msg.role === "user") {
+            const text = extractText(msg.content);
+            if (text) pendingUserMessages.push(text);
+          } else if (msg.role === "assistant") {
+            const text = extractText(msg.content);
+            if (text) pendingAssistantMessages.push(text);
+          }
+        }
+      } catch {
+        // Session may not have entries yet (brand-new session)
+      }
+
       const stats = store.stats();
       if (stats.semantic + stats.lessons > 0) {
         ctx.ui.setStatus("pi-memory", `Memory: ${stats.semantic} facts, ${stats.lessons} lessons`);
