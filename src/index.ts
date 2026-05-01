@@ -24,6 +24,7 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { MemoryStore } from "./store.js";
 import { buildContextBlock, type InjectorConfig } from "./injector.js";
+import { initI18n, t } from "./i18n.js";
 
 type ToolResult = AgentToolResult<unknown>;
 function ok(text: string): ToolResult { return { content: [{ type: "text", text }], details: {} }; }
@@ -132,6 +133,7 @@ function readSettingsConfig(cwd?: string): InjectorConfig {
 }
 
 export default function (pi: ExtensionAPI) {
+  initI18n(pi);
   let store: MemoryStore | null = null;
   let pendingUserMessages: string[] = [];
   let pendingAssistantMessages: string[] = [];
@@ -388,7 +390,7 @@ export default function (pi: ExtensionAPI) {
       id: Type.Optional(Type.String({ description: "ID for lessons" })),
     }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
-      if (!store) return ok("Memory store not initialized");
+      if (!store) return ok(t("memory.common.storeNotInitialized", "Memory store not initialized"));
 
       params = {
         ...params,
@@ -398,20 +400,24 @@ export default function (pi: ExtensionAPI) {
       };
 
       if (params.type !== "fact" && params.type !== "lesson") {
-        return ok(`Invalid type: ${params.type}. Must be 'fact' or 'lesson'.`);
+        return ok(t("memory.forget.invalidType", "Invalid type: {type}. Must be 'fact' or 'lesson'.", { type: params.type }));
       }
 
       if (params.type === "fact" && params.key) {
         const deleted = store.deleteSemantic(params.key);
-        return ok(deleted ? `Forgot: ${params.key}` : `Not found: ${params.key}`);
+        return ok(deleted
+          ? t("memory.forget.factDeleted", "Forgot: {key}", { key: params.key })
+          : t("memory.forget.factNotFound", "Not found: {key}", { key: params.key }));
       }
 
       if (params.type === "lesson" && params.id) {
         const deleted = store.deleteLesson(params.id);
-        return ok(deleted ? `Forgot lesson ${params.id}` : `Not found: ${params.id}`);
+        return ok(deleted
+          ? t("memory.forget.lessonDeleted", "Forgot lesson {id}", { id: params.id })
+          : t("memory.forget.lessonNotFound", "Not found: {id}", { id: params.id }));
       }
 
-      return ok("Provide key (for facts) or id (for lessons)");
+      return ok(t("memory.forget.missingTarget", "Provide key (for facts) or id (for lessons)"));
     },
   });
 
