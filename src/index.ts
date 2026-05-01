@@ -17,6 +17,7 @@
  * - memory_lessons: list learned corrections
  * - memory_stats: show memory statistics
  */
+import { initI18n, t } from "./i18n.js";
 import type { ExtensionAPI, AgentToolResult } from "@mariozechner/pi-coding-agent";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { join } from "node:path";
@@ -132,6 +133,7 @@ function readSettingsConfig(cwd?: string): InjectorConfig {
 }
 
 export default function (pi: ExtensionAPI) {
+  initI18n(pi);
   let store: MemoryStore | null = null;
   let pendingUserMessages: string[] = [];
   let pendingAssistantMessages: string[] = [];
@@ -180,11 +182,11 @@ export default function (pi: ExtensionAPI) {
 
       const stats = store.stats();
       if (stats.semantic + stats.lessons > 0) {
-        ctx.ui.setStatus("pi-memory", `Memory: ${stats.semantic} facts, ${stats.lessons} lessons`);
+        ctx.ui.setStatus("pi-memory", t("status.stats", "Memory: {facts} facts, {lessons} lessons", { facts: stats.semantic, lessons: stats.lessons }));
         setTimeout(() => ctx.ui.setStatus("pi-memory", ""), 5000);
       }
     } catch (err: any) {
-      ctx.ui.notify(`pi-memory: failed to open store: ${err.message}`, "warning");
+      ctx.ui.notify(t("error.openStore", "pi-memory: failed to open store: {error}", { error: err.message }), "warning");
     }
   });
 
@@ -223,7 +225,7 @@ export default function (pi: ExtensionAPI) {
     if (!store) return;
 
     if (pendingUserMessages.length >= 3) {
-      ctx.ui.setStatus("pi-memory", "🧠 Consolidating memory...");
+      ctx.ui.setStatus("pi-memory", t("status.consolidating", "🧠 Consolidating memory..."));
       try {
         await consolidateSession();
       } catch {
@@ -242,7 +244,7 @@ export default function (pi: ExtensionAPI) {
 
     // Immediate visual feedback — user sees this as soon as C-c C-c fires
     if (cachedCtx) {
-      cachedCtx.ui.setStatus("pi-memory", "🧠 Consolidating memory...");
+      cachedCtx.ui.setStatus("pi-memory", t("status.consolidating", "🧠 Consolidating memory..."));
     }
 
     // Consolidate if we have enough conversation
@@ -304,14 +306,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "memory_search",
-    label: "Memory Search",
-    description: "Search persistent memory for facts, preferences, and project patterns the user has established across sessions.",
+    label: t("tool.search.label", "Memory Search"),
+    description: t("tool.search.description", "Search persistent memory for facts, preferences, and project patterns the user has established across sessions."),
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
     }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
-      if (!store) return ok("Memory store not initialized");
+      if (!store) return ok(t("cmd.notInitialized", "Memory store not initialized"));
 
       const results = store.searchSemantic(params.query, params.limit ?? 10);
       if (results.length === 0) {
@@ -328,8 +330,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "memory_remember",
-    label: "Memory Remember",
-    description: "Store a fact, preference, or lesson in persistent memory. Use dotted keys like pref.editor, project.rosie.lang, tool.sed.usage. For corrections, use type='lesson'.",
+    label: t("tool.remember.label", "Memory Remember"),
+    description: t("tool.remember.description", "Store a fact, preference, or lesson in persistent memory. Use dotted keys like pref.editor, project.rosie.lang, tool.sed.usage. For corrections, use type='lesson'."),
     parameters: Type.Object({
       type: Type.String({ description: "'fact' for key-value, 'lesson' for a correction" }),
       key: Type.Optional(Type.String({ description: "Dotted key for facts (e.g. pref.commit_style)" })),
@@ -339,7 +341,7 @@ export default function (pi: ExtensionAPI) {
       negative: Type.Optional(Type.Boolean({ description: "True if this is something to AVOID" })),
     }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
-      if (!store) return ok("Memory store not initialized");
+      if (!store) return ok(t("cmd.notInitialized", "Memory store not initialized"));
 
       // Defensively unwrap double-quoted string args from misbehaving model runners.
       params = {
@@ -380,15 +382,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "memory_forget",
-    label: "Memory Forget",
-    description: "Remove a fact or lesson from persistent memory.",
+    label: t("tool.forget.label", "Memory Forget"),
+    description: t("tool.forget.description", "Remove a fact or lesson from persistent memory."),
     parameters: Type.Object({
       type: Type.String(),
       key: Type.Optional(Type.String({ description: "Key for facts" })),
       id: Type.Optional(Type.String({ description: "ID for lessons" })),
     }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
-      if (!store) return ok("Memory store not initialized");
+      if (!store) return ok(t("cmd.notInitialized", "Memory store not initialized"));
 
       params = {
         ...params,
@@ -403,12 +405,12 @@ export default function (pi: ExtensionAPI) {
 
       if (params.type === "fact" && params.key) {
         const deleted = store.deleteSemantic(params.key);
-        return ok(deleted ? `Forgot: ${params.key}` : `Not found: ${params.key}`);
+        return ok(deleted ? t("result.forgot", "Forgot: {key}", { key: params.key }) : t("result.notFound", "Not found: {key}", { key: params.key }));
       }
 
       if (params.type === "lesson" && params.id) {
         const deleted = store.deleteLesson(params.id);
-        return ok(deleted ? `Forgot lesson ${params.id}` : `Not found: ${params.id}`);
+        return ok(deleted ? t("result.forgotLesson", "Forgot lesson {id}", { id: params.id }) : t("result.notFoundLesson", "Not found: {id}", { id: params.id }));
       }
 
       return ok("Provide key (for facts) or id (for lessons)");
@@ -417,14 +419,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "memory_lessons",
-    label: "Memory Lessons",
-    description: "List learned corrections and lessons from past sessions.",
+    label: t("tool.lessons.label", "Memory Lessons"),
+    description: t("tool.lessons.description", "List learned corrections and lessons from past sessions."),
     parameters: Type.Object({
       category: Type.Optional(Type.String({ description: "Filter by category" })),
       limit: Type.Optional(Type.Number({ description: "Max results (default 50)" })),
     }) as any,
     async execute(_id, params, _signal, _update, _ctx) {
-      if (!store) return ok("Memory store not initialized");
+      if (!store) return ok(t("cmd.notInitialized", "Memory store not initialized"));
 
       const lessons = store.listLessons(params.category, params.limit ?? 50);
       if (lessons.length === 0) {
@@ -441,11 +443,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "memory_stats",
-    label: "Memory Stats",
-    description: "Show memory statistics — how many facts, lessons, and events are stored.",
+    label: t("tool.stats.label", "Memory Stats"),
+    description: t("tool.stats.description", "Show memory statistics — how many facts, lessons, and events are stored."),
     parameters: Type.Object({}) as any,
     async execute(_id, _params, _signal, _update, _ctx) {
-      if (!store) return ok("Memory store not initialized");
+      if (!store) return ok(t("cmd.notInitialized", "Memory store not initialized"));
 
       const stats = store.stats();
       const text = `Memory: ${stats.semantic} semantic facts, ${stats.lessons} active lessons, ${stats.events} events logged\nDB: ${resolvedDbPath}`;
@@ -456,25 +458,25 @@ export default function (pi: ExtensionAPI) {
   // ─── Commands ──────────────────────────────────────────────────
 
   pi.registerCommand("memory-consolidate", {
-    description: "Manually trigger memory consolidation for the current session",
+    description: t("cmd.consolidate.description", "Manually trigger memory consolidation for the current session"),
     async handler(_args, ctx) {
       if (!store) {
-        ctx.ui.notify("Memory store not initialized", "warning");
+        ctx.ui.notify(t("cmd.notInitialized", "Memory store not initialized"), "warning");
         return;
       }
 
       if (pendingUserMessages.length < 2) {
-        ctx.ui.notify("Not enough conversation to consolidate (need at least 2 user messages)", "warning");
+        ctx.ui.notify(t("cmd.notEnough", "Not enough conversation to consolidate (need at least 2 user messages)"), "warning");
         return;
       }
 
-      ctx.ui.notify("Consolidating session memory...", "info");
+      ctx.ui.notify(t("cmd.consolidating", "Consolidating session memory..."), "info");
       try {
         await consolidateSession();
         const stats = store.stats();
-        ctx.ui.notify(`Memory updated: ${stats.semantic} facts, ${stats.lessons} lessons`, "info");
+        ctx.ui.notify(t("cmd.updated", "Memory updated: {facts} facts, {lessons} lessons", { facts: stats.semantic, lessons: stats.lessons }), "info");
       } catch (err: any) {
-        ctx.ui.notify(`Consolidation failed: ${err.message}`, "error");
+        ctx.ui.notify(t("cmd.failed", "Consolidation failed: {error}", { error: err.message }), "error");
       }
     },
   });
