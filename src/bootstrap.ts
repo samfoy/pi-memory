@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { MemoryStore } from "./store.js";
 import { parseConsolidationResponse, applyExtracted, CONSOLIDATION_PROMPT } from "./consolidator.js";
 
@@ -100,8 +100,13 @@ ${batch.map((s, j) => `### Session ${j + 1}\n${s}`).join("\n\n")}`;
   }
 
   try {
-    const result = execSync(
-      `pi -p ${JSON.stringify(prompt)} --print`,
+    // Pass the prompt as an argv entry rather than interpolating into a shell
+    // string — session summaries are arbitrary past-project content (READMEs,
+    // file snippets, MCP tool output), so skipping the shell avoids any quoting
+    // pitfalls. Matches the runtime path in index.ts which uses pi.exec(argv).
+    const result = execFileSync(
+      "pi",
+      ["-p", prompt, "--print"],
       { encoding: "utf8", timeout: 120_000, cwd: homedir(), maxBuffer: 1024 * 1024 }
     );
 
