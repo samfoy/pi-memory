@@ -191,7 +191,12 @@ export default function (pi: ExtensionAPI) {
       const stats = store.stats();
       if (stats.semantic + stats.lessons > 0) {
         ctx.ui.setStatus("pi-memory", `Memory: ${stats.semantic} facts, ${stats.lessons} lessons`);
-        setTimeout(() => ctx.ui.setStatus("pi-memory", ""), 5000);
+        // The captured ctx may be stale by the time this fires (resume,
+        // /new, /fork, /reload). Stale-ctx access throws synchronously;
+        // swallow it — by then the new session has set its own status.
+        setTimeout(() => {
+          try { ctx.ui.setStatus("pi-memory", ""); } catch { /* ctx stale: harmless */ }
+        }, 5000);
       }
     } catch (err: any) {
       ctx.ui.notify(`pi-memory: failed to open store: ${err.message}`, "warning");
