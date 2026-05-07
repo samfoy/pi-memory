@@ -26,6 +26,17 @@ export type LessonInjectionMode = "all" | "selective";
 
 export interface InjectorConfig {
   lessonInjection?: LessonInjectionMode;
+  /**
+   * Model string passed to `pi --model` for session-end consolidation.
+   * When omitted, the built-in default is used.  Useful for users on
+   * non-Anthropic providers (OpenAI/Codex/OpenRouter/Ollama/local),
+   * or for picking a cheaper/faster model for background extraction.
+   *
+   * Invalid model strings will cause the consolidation sub-process to
+   * fail — the existing try/catch swallows that silently, so the worst
+   * case is that consolidation skips this session.
+   */
+  consolidationModel?: string;
 }
 
 /**
