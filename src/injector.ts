@@ -7,6 +7,7 @@
  * - Fallback (no prompt): dump top entries by prefix (old behavior).
  */
 import type { MemoryStore, SemanticEntry, LessonEntry } from "./store.js";
+import os from "node:os";
 
 const MAX_CONTEXT_CHARS = 8000;
 const SEARCH_LIMIT = 15;
@@ -276,9 +277,9 @@ const MEMORY_DRIFT_CAVEAT = `## Before acting on memory
 
 function projectSlug(cwd: string): string {
   const parts = cwd.split("/").filter(Boolean);
-  const skip = new Set(["workplace", "local", "home", "src", "scratch"]);
+  const skip = new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().name]);
   for (const p of parts.reverse()) {
     if (!skip.has(p.toLowerCase()) && p.length > 1) return p.toLowerCase();
   }
-  return parts[parts.length - 1]?.toLowerCase() ?? "";
+  return "";
 }
