@@ -104,6 +104,19 @@ The result is capped at 15 most relevant lessons instead of all of them.
 | `"all"` (default) | Every lesson injected into every session |
 | `"selective"` | Only relevant lessons based on prompt, project, and category |
 
+**Consolidation model** — At session end, pi-memory spawns a lightweight `pi -p --print` process to extract facts and lessons from the conversation. By default it uses `claude-sonnet-4-20250514`, which is a no-op for users on non-Anthropic providers. Override it with any model string your `pi` binary accepts:
+
+```json
+{
+  "memory": {
+    "lessonInjection": "selective",
+    "consolidationModel": "openai/gpt-4.1-mini"
+  }
+}
+```
+
+Set this in `~/.pi/agent/settings.json` for a user-wide default, or in `{project}/.pi/settings.json` (either under `memory` or `pi-memory`) to override per project. Examples: `openai/gpt-4.1-mini`, `ollama/qwen3:8b`, `anthropic/claude-haiku-4-5-20251001`. If the model string is invalid the consolidation sub-process fails silently and the session's memory is simply not consolidated — no data is lost from previous sessions.
+
 ## Storage
 
 SQLite database at `~/.pi/memory/memory.db` (WAL mode). Three tables:

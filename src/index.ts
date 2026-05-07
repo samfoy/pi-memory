@@ -62,6 +62,13 @@ const DEFAULT_DB_PATH = join(DEFAULT_MEMORY_DIR, "memory.db");
 const GLOBAL_SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
 /**
+ * Default model used for session-end consolidation when no user override is
+ * present in settings.json.  Preserves the historical behavior for existing
+ * users — overridable via `memory.consolidationModel` (global or project).
+ */
+export const DEFAULT_CONSOLIDATION_MODEL = "claude-sonnet-4-20250514";
+
+/**
  * Resolve the memory DB path for a given working directory.
  *
  * Priority (highest first):
@@ -95,29 +102,45 @@ export function resolveDbPath(cwd: string): string {
 }
 
 /**
+ * Apply a single settings-block (the object under `memory` / `pi-memory`) to
+ * `config`.  Invalid fields are ignored so a malformed value for one key
+ * cannot clobber a valid value already set by a higher-priority source.
+ */
+function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): void {
+  if (!memorySettings || typeof memorySettings !== "object") return;
+  const m = memorySettings as Record<string, unknown>;
+
+  if (m.lessonInjection === "all" || m.lessonInjection === "selective") {
+    config.lessonInjection = m.lessonInjection;
+  }
+  if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
+    config.consolidationModel = m.consolidationModel.trim();
+  }
+}
+
+/**
  * Read pi-memory config from settings.json.
- * Looks for a "memory" key with extension-specific settings.
+ * Looks for a "memory" (or project-local "pi-memory") key with
+ * extension-specific settings.
  *
  * Example settings.json:
  * {
  *   "memory": {
- *     "lessonInjection": "selective"
+ *     "lessonInjection": "selective",
+ *     "consolidationModel": "openai/gpt-4.1-mini"
  *   }
  * }
+ *
+ * Exported for tests.
  */
-function readSettingsConfig(cwd?: string): InjectorConfig {
+export function readSettingsConfig(cwd?: string): InjectorConfig {
   const config: InjectorConfig = {};
 
   // Read global settings
   try {
     const raw = readFileSync(GLOBAL_SETTINGS_PATH, "utf-8");
     const settings = JSON.parse(raw);
-    const memorySettings = settings?.memory;
-    if (memorySettings && typeof memorySettings === "object") {
-      if (memorySettings.lessonInjection === "all" || memorySettings.lessonInjection === "selective") {
-        config.lessonInjection = memorySettings.lessonInjection;
-      }
-    }
+    mergeMemorySettings(config, settings?.memory);
   } catch {
     // no global settings
   }
@@ -127,12 +150,8 @@ function readSettingsConfig(cwd?: string): InjectorConfig {
     try {
       const raw = readFileSync(join(cwd, ".pi", "settings.json"), "utf-8");
       const settings = JSON.parse(raw);
-      const memorySettings = settings?.memory ?? settings?.["pi-memory"];
-      if (memorySettings && typeof memorySettings === "object") {
-        if (memorySettings.lessonInjection === "all" || memorySettings.lessonInjection === "selective") {
-          config.lessonInjection = memorySettings.lessonInjection;
-        }
-      }
+      // Accept either `memory` (preferred) or `pi-memory` (package-scoped).
+      mergeMemorySettings(config, settings?.memory ?? settings?.["pi-memory"]);
     } catch {
       // no local settings
     }
@@ -296,7 +315,7 @@ export default function (pi: ExtensionAPI) {
         "-p", prompt,
         "--print",
         "--no-extensions",
-        "--model", "claude-sonnet-4-20250514",
+        "--model", injectorConfig.consolidationModel ?? DEFAULT_CONSOLIDATION_MODEL,
       ], {
         timeout: 45_000,
         cwd: sessionCwd,
