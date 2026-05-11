@@ -262,8 +262,12 @@ export default function (pi: ExtensionAPI) {
         await consolidateSession();
       } catch {
         // Best-effort
+      } finally {
+        // Always clear — even if consolidateSession threw synchronously or
+        // ctx went stale. Stuck indicator otherwise pins for the rest of
+        // the session. See samfoy/pi-total-recall#5.
+        try { ctx.ui.setStatus("pi-memory", ""); } catch { /* ctx stale: harmless */ }
       }
-      ctx.ui.setStatus("pi-memory", "");
     }
 
     // Reset for the next session
@@ -310,16 +314,34 @@ export default function (pi: ExtensionAPI) {
 
     // Use pi's exec to call the LLM via a lightweight pi session.
     // Use a fast model to avoid blocking shutdown for too long.
+    //
+    // Defence in depth: pi.exec has a 45s timeout, but we also wrap the
+    // whole call in a hard 60s backstop. If pi.exec's timeout ever fails
+    // to kill the child (e.g. stuck in syscall), the Promise.race below
+    // still rejects and lets the caller clear its status indicator.
+    const EXEC_TIMEOUT_MS = 45_000;
+    const HARD_TIMEOUT_MS = 60_000;
+    let backstopHandle: ReturnType<typeof setTimeout> | undefined;
     try {
-      const result = await pi.exec("pi", [
+      const execPromise = pi.exec("pi", [
         "-p", prompt,
         "--print",
         "--no-extensions",
         "--model", injectorConfig.consolidationModel ?? DEFAULT_CONSOLIDATION_MODEL,
       ], {
-        timeout: 45_000,
+        timeout: EXEC_TIMEOUT_MS,
         cwd: sessionCwd,
       });
+
+      const result = await Promise.race([
+        execPromise,
+        new Promise<never>((_, reject) => {
+          backstopHandle = setTimeout(
+            () => reject(new Error("consolidation backstop timeout")),
+            HARD_TIMEOUT_MS,
+          );
+        }),
+      ]);
 
       if (result.code === 0 && result.stdout) {
         const extracted = parseConsolidationResponse(result.stdout);
@@ -331,6 +353,8 @@ export default function (pi: ExtensionAPI) {
       }
     } catch {
       // Timeout or exec failure — skip consolidation this session
+    } finally {
+      if (backstopHandle) clearTimeout(backstopHandle);
     }
   }
 
