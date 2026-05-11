@@ -277,7 +277,7 @@ const MEMORY_DRIFT_CAVEAT = `## Before acting on memory
 
 function projectSlug(cwd: string): string {
   const parts = cwd.split("/").filter(Boolean);
-  const skip = new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().name]);
+  const skip = new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().username]);
   for (const p of parts.reverse()) {
     if (!skip.has(p.toLowerCase()) && p.length > 1) return p.toLowerCase();
   }
