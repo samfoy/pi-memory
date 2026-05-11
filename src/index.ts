@@ -228,8 +228,20 @@ export default function (pi: ExtensionAPI) {
     const { text } = buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
     if (!text) return;
 
+    // Inject as a custom user-role message rather than mutating the system prompt.
+    // Mutating event.systemPrompt on every turn invalidates provider prefix caches
+    // (e.g. Bedrock / Anthropic cache_control): any drift in the system block
+    // forces the entire conversation suffix to be re-cached at cacheWrite rates.
+    // Placing the memory block AFTER the user message keeps the stable system-prompt
+    // prefix cache intact — only the new turn's content needs to be freshly cached.
+    // Tradeoff: each block persists in session history (~300-500 tokens), but those
+    // cache cleanly on subsequent turns. display:false hides the block in the TUI.
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${text}`,
+      message: {
+        customType: "pi-memory-context",
+        content: text,
+        display: false,
+      },
     };
   });
 

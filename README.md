@@ -62,7 +62,7 @@ Or add to `~/.pi/agent/settings.json`:
 ## How It Works
 
 1. **`session_start`** — Opens the SQLite store, shows memory stats briefly in the status bar
-2. **`before_agent_start`** — Builds a `<memory>` context block from stored facts and lessons, appends it to the system prompt
+2. **`before_agent_start`** — Builds a `<memory>` context block from stored facts and lessons, injected as a hidden custom message (customType `pi-memory-context`) appended to the turn's input. This keeps the system prompt byte-stable across turns so provider prefix caches (Bedrock / Anthropic `cache_control`) remain valid.
 3. **`agent_end`** — Collects conversation messages for later consolidation
 4. **`session_shutdown`** — Runs LLM consolidation (via `pi -p --print`) to extract structured knowledge, then closes the store
 
@@ -78,7 +78,9 @@ Only facts with confidence ≥ 0.8 are stored. Lessons are deduplicated using ex
 
 ### Injection
 
-At session start, stored memory is organized into sections (preferences, project context scoped to cwd, tool preferences, lessons, user identity) and injected as a `<memory>` block in the system prompt. The block is capped at 8KB.
+At session start, stored memory is organized into sections (preferences, project context scoped to cwd, tool preferences, lessons, user identity) and injected as a hidden `<memory>` custom message alongside each user turn. The block is capped at 8KB.
+
+The block is attached per-turn as a `role: "custom"` message (customType `pi-memory-context`, `display: false`) rather than being spliced into the system prompt. This is a deliberate cache-friendliness choice: mutating the system prompt every turn would invalidate the provider's prefix cache (Bedrock / Anthropic `cache_control` point), forcing the entire conversation suffix to be re-written at `cacheWrite` rates. Injecting after the user message instead keeps the stable prefix cache intact; only new turn content needs fresh caching.
 
 **Selective lesson injection** — By default, all lessons are injected into every session. When you have many lessons across different domains, this can waste context. Enable selective mode to filter lessons by relevance:
 
