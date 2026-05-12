@@ -92,22 +92,22 @@ describe("readSettingsConfig", () => {
     assert.equal(cfg.consolidationModel, "openai/gpt-4.1-mini");
   });
 
-  it("reads selectiveInjection = true", () => {
-    writeProjectSettings({ memory: { selectiveInjection: true } });
+  it("reads perTurnInjection = true", () => {
+    writeProjectSettings({ memory: { perTurnInjection: true } });
     const cfg = readSettingsConfig(tmpProject);
-    assert.equal(cfg.selectiveInjection, true);
+    assert.equal(cfg.perTurnInjection, true);
   });
 
-  it("reads selectiveInjection = false", () => {
-    writeProjectSettings({ memory: { selectiveInjection: false } });
+  it("reads perTurnInjection = false", () => {
+    writeProjectSettings({ memory: { perTurnInjection: false } });
     const cfg = readSettingsConfig(tmpProject);
-    assert.equal(cfg.selectiveInjection, false);
+    assert.equal(cfg.perTurnInjection, false);
   });
 
-  it("ignores non-boolean selectiveInjection", () => {
-    writeProjectSettings({ memory: { selectiveInjection: "yes" } });
+  it("ignores non-boolean perTurnInjection", () => {
+    writeProjectSettings({ memory: { perTurnInjection: "yes" } });
     const cfg = readSettingsConfig(tmpProject);
-    assert.equal(cfg.selectiveInjection, undefined);
+    assert.equal(cfg.perTurnInjection, undefined);
   });
 
   it("returns undefined consolidationModel when no settings.json is present", () => {

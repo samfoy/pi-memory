@@ -85,16 +85,16 @@ The injection happens at `session_start` via `pi.sendMessage`, not per-turn. Thi
 - **Cache stability.** Mutating the system prompt per turn (as earlier versions did) invalidates the provider's prefix cache after the system block (Bedrock / Anthropic `cache_control`), forcing the conversation suffix to be re-written at `cacheWrite` rates on every turn boundary.
 - **Simplicity.** One block, one time, cached for the whole session.
 
-Tradeoff: per-user-message selective injection is off by default — the fallback dump covers preferences, project context for the cwd, tool preferences, lessons, and user identity, which is enough for typical workflows given the 8KB cap. Users with large memory stores who want per-query relevance can opt in (see "Selective injection" below).
+Tradeoff: per-user-message selective injection is off by default — the fallback dump covers preferences, project context for the cwd, tool preferences, lessons, and user identity, which is enough for typical workflows given the 8KB cap. Users with large memory stores who want per-query relevance can opt in (see "Per-turn injection" below).
 
-### Selective injection (opt-in)
+### Per-turn injection (opt-in)
 
-Set `selectiveInjection: true` to restore v1.0.x per-turn behavior:
+Set `perTurnInjection: true` to restore v1.0.x per-turn behavior:
 
 ```json
 {
   "memory": {
-    "selectiveInjection": true
+    "perTurnInjection": true
   }
 }
 ```
@@ -108,12 +108,12 @@ When enabled:
 
 Correctness is preserved either way: `systemPrompt` is a separate field from the messages list, so the user's question remains the last user-role message.
 
-**Lesson filtering in selective mode** — When `selectiveInjection: true`, the `lessonInjection` config takes effect:
+**Lesson filtering in per-turn mode** — When `perTurnInjection: true`, the `lessonInjection` config takes effect:
 
 ```json
 {
   "memory": {
-    "selectiveInjection": true,
+    "perTurnInjection": true,
     "lessonInjection": "selective"
   }
 }
@@ -128,7 +128,7 @@ In `selective` lesson mode, lessons are filtered by:
 
 The result is capped at 15 most relevant lessons instead of all of them.
 
-| `lessonInjection` | Behavior (only when `selectiveInjection: true`) |
+| `lessonInjection` | Behavior (only when `perTurnInjection: true`) |
 |------|----------|
 | `"all"` (default) | All lessons injected every turn |
 | `"selective"` | Only relevant lessons based on prompt, project, and category |

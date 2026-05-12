@@ -49,7 +49,7 @@ export interface InjectorConfig {
    * from the messages list, so the user's question remains the last
    * user-role message and the model responds to it.
    */
-  selectiveInjection?: boolean;
+  perTurnInjection?: boolean;
   /**
    * Model string passed to `pi --model` for session-end consolidation.
    * When omitted, the built-in default is used.  Useful for users on

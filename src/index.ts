@@ -113,8 +113,8 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
   if (m.lessonInjection === "all" || m.lessonInjection === "selective") {
     config.lessonInjection = m.lessonInjection;
   }
-  if (typeof m.selectiveInjection === "boolean") {
-    config.selectiveInjection = m.selectiveInjection;
+  if (typeof m.perTurnInjection === "boolean") {
+    config.perTurnInjection = m.perTurnInjection;
   }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
     config.consolidationModel = m.consolidationModel.trim();
@@ -129,7 +129,7 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
  * Example settings.json:
  * {
  *   "memory": {
- *     "selectiveInjection": true,
+ *     "perTurnInjection": true,
  *     "lessonInjection": "selective",
  *     "consolidationModel": "openai/gpt-4.1-mini"
  *   }
@@ -225,7 +225,7 @@ export default function (pi: ExtensionAPI) {
       // Inject stored memory as a one-shot custom message BEFORE any user
       // message arrives. Matches pi-knowledge-search's pattern.
       //
-      // Skipped when `selectiveInjection: true` — in that mode the
+      // Skipped when `perTurnInjection: true` — in that mode the
       // before_agent_start handler below takes over with per-turn semantic
       // matching via systemPrompt mutation.
       //
@@ -240,10 +240,10 @@ export default function (pi: ExtensionAPI) {
       // v1.2.0 injects once at session_start using fallback mode (all facts +
       // lessons, 8KB cap). Correct ordering, stable cache, simpler model.
       //
-      // v1.3.0 adds `selectiveInjection: true` as an opt-in to restore v1.0.x
+      // v1.3.x adds `perTurnInjection: true` as an opt-in to restore v1.0.x
       // per-turn selective behavior (mutates systemPrompt, breaks cache on
       // every turn boundary — users opt in knowing the tradeoff).
-      if (!injectorConfig.selectiveInjection) {
+      if (!injectorConfig.perTurnInjection) {
         try {
           const alreadyInjected = ctx.sessionManager
             .getEntries()
@@ -279,7 +279,7 @@ export default function (pi: ExtensionAPI) {
   // ----------------------------------------------------------------
   // Opt-in per-turn selective injection (v1.3.0).
   //
-  // When `selectiveInjection: true` is set, run a semantic search against the
+  // When `perTurnInjection: true` is set, run a semantic search against the
   // current user prompt and append matching memory to event.systemPrompt.
   // MUST use systemPrompt (not { message }) — returning { message } puts the
   // content AFTER the user message and causes the model to respond to the
@@ -290,7 +290,7 @@ export default function (pi: ExtensionAPI) {
   // ----------------------------------------------------------------
   pi.on("before_agent_start", async (event, ctx) => {
     if (!store) return;
-    if (!injectorConfig.selectiveInjection) return;
+    if (!injectorConfig.perTurnInjection) return;
 
     const { text } = buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
     if (!text) return;
