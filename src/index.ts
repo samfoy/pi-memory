@@ -5,8 +5,8 @@
  * Injects relevant memory into future conversations.
  *
  * Lifecycle:
- * - session_start: open store, inject memory into status
- * - before_agent_start: inject memory context into system prompt
+ * - session_start: open store, inject memory as a one-shot custom message
+ * - (memory context is no longer injected per-turn — see v1.2.0 changelog)
  * - agent_end: queue messages for consolidation
  * - session_shutdown: consolidate and close store
  *
@@ -17,7 +17,7 @@
  * - memory_lessons: list learned corrections
  * - memory_stats: show memory statistics
  */
-import type { ExtensionAPI, AgentToolResult } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, AgentToolResult, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -217,33 +217,60 @@ export default function (pi: ExtensionAPI) {
           try { ctx.ui.setStatus("pi-memory", ""); } catch { /* ctx stale: harmless */ }
         }, 5000);
       }
+
+      // Inject stored memory as a one-shot custom message BEFORE any user
+      // message arrives. Matches pi-knowledge-search's pattern.
+      //
+      // Historical note: v1.0.x mutated event.systemPrompt in before_agent_start.
+      // That broke provider prefix caches on every turn boundary (any drift in
+      // the system block re-writes the conversation suffix at cacheWrite rates).
+      //
+      // v1.1.x returned { message } from before_agent_start. That was worse: the
+      // custom message landed AFTER the user's question in history, so the model
+      // responded to the memory block instead of the user.
+      //
+      // v1.2.0 injects once at session_start using fallback mode (all facts +
+      // lessons, 8KB cap). Correct ordering, stable cache, simpler model.
+      // Loses per-user-message selective injection — a deliberate tradeoff.
+      try {
+        const alreadyInjected = ctx.sessionManager
+          .getEntries()
+          .some(
+            (e: SessionEntry) =>
+              e.type === "custom_message" && e.customType === "pi-memory-context",
+          );
+        if (!alreadyInjected) {
+          const { text, stats: injStats } = buildContextBlock(
+            store,
+            sessionCwd,
+            undefined, // no prompt → fallback: dump all relevant memory
+            injectorConfig,
+          );
+          if (text) {
+            pi.sendMessage({
+              customType: "pi-memory-context",
+              content: text,
+              display: false,
+              details: injStats,
+            });
+          }
+        }
+      } catch {
+        // Injection is nice-to-have; never break startup over it.
+      }
     } catch (err: any) {
       ctx.ui.notify(`pi-memory: failed to open store: ${err.message}`, "warning");
     }
   });
 
-  pi.on("before_agent_start", async (event, ctx) => {
-    if (!store) return;
+  // ----------------------------------------------------------------
+  // v1.2.0: per-turn memory injection was removed. The former
+  // before_agent_start handler appended memory context as a custom message
+  // AFTER the user's question, which caused the model to respond to the
+  // memory block instead of the user. Memory is now injected once at
+  // session_start (above) and lives at the top of conversation history.
+  // ----------------------------------------------------------------
 
-    const { text } = buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
-    if (!text) return;
-
-    // Inject as a custom user-role message rather than mutating the system prompt.
-    // Mutating event.systemPrompt on every turn invalidates provider prefix caches
-    // (e.g. Bedrock / Anthropic cache_control): any drift in the system block
-    // forces the entire conversation suffix to be re-cached at cacheWrite rates.
-    // Placing the memory block AFTER the user message keeps the stable system-prompt
-    // prefix cache intact — only the new turn's content needs to be freshly cached.
-    // Tradeoff: each block persists in session history (~300-500 tokens), but those
-    // cache cleanly on subsequent turns. display:false hides the block in the TUI.
-    return {
-      message: {
-        customType: "pi-memory-context",
-        content: text,
-        display: false,
-      },
-    };
-  });
 
   pi.on("agent_end", async (event, _ctx) => {
     // Collect messages for consolidation at shutdown

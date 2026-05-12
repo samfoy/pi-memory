@@ -61,10 +61,9 @@ Or add to `~/.pi/agent/settings.json`:
 
 ## How It Works
 
-1. **`session_start`** — Opens the SQLite store, shows memory stats briefly in the status bar
-2. **`before_agent_start`** — Builds a `<memory>` context block from stored facts and lessons, injected as a hidden custom message (customType `pi-memory-context`) appended to the turn's input. This keeps the system prompt byte-stable across turns so provider prefix caches (Bedrock / Anthropic `cache_control`) remain valid.
-3. **`agent_end`** — Collects conversation messages for later consolidation
-4. **`session_shutdown`** — Runs LLM consolidation (via `pi -p --print`) to extract structured knowledge, then closes the store
+1. **`session_start`** — Opens the SQLite store, shows memory stats briefly in the status bar, and injects a `<memory>` context block as a hidden custom message (customType `pi-memory-context`, `display: false`) **before** any user message. One-shot per session.
+2. **`agent_end`** — Collects conversation messages for later consolidation
+3. **`session_shutdown`** — Runs LLM consolidation (via `pi -p --print`) to extract structured knowledge, then closes the store
 
 ### Consolidation
 
@@ -78,9 +77,15 @@ Only facts with confidence ≥ 0.8 are stored. Lessons are deduplicated using ex
 
 ### Injection
 
-At session start, stored memory is organized into sections (preferences, project context scoped to cwd, tool preferences, lessons, user identity) and injected as a hidden `<memory>` custom message alongside each user turn. The block is capped at 8KB.
+At session start, stored memory is organized into sections (preferences, project context scoped to cwd, tool preferences, lessons, user identity) and injected **once** as a hidden `<memory>` custom message that sits before the first user message in history. The block is capped at 8KB.
 
-The block is attached per-turn as a `role: "custom"` message (customType `pi-memory-context`, `display: false`) rather than being spliced into the system prompt. This is a deliberate cache-friendliness choice: mutating the system prompt every turn would invalidate the provider's prefix cache (Bedrock / Anthropic `cache_control` point), forcing the entire conversation suffix to be re-written at `cacheWrite` rates. Injecting after the user message instead keeps the stable prefix cache intact; only new turn content needs fresh caching.
+The injection happens at `session_start` via `pi.sendMessage`, not per-turn. This is deliberate:
+
+- **Correctness.** A per-turn injection via `before_agent_start` places the memory block *after* the user's question in the message list, so the model ends up responding to the memory block instead of the user. One-shot at the top of history avoids that ordering trap.
+- **Cache stability.** Mutating the system prompt per turn (as earlier versions did) invalidates the provider's prefix cache after the system block (Bedrock / Anthropic `cache_control`), forcing the conversation suffix to be re-written at `cacheWrite` rates on every turn boundary.
+- **Simplicity.** One block, one time, cached for the whole session.
+
+Tradeoff: per-user-message selective injection (v1.0.x `lessonInjection: "selective"` behavior) is gone. The fallback dump covers preferences, project context for the cwd, tool preferences, lessons, and user identity — enough for typical workflows given the 8KB cap.
 
 **Selective lesson injection** — By default, all lessons are injected into every session. When you have many lessons across different domains, this can waste context. Enable selective mode to filter lessons by relevance:
 
