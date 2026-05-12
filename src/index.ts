@@ -76,6 +76,27 @@ export const DEFAULT_CONSOLIDATION_MODEL = "claude-sonnet-4-20250514";
  *   2. "pi-total-recall".localPath cascade → {localPath}/memory/memory.db
  *   3. Global default: ~/.pi/memory/memory.db  (preserves existing behavior)
  */
+/**
+ * Emit a warning when a settings block contains keys outside a known
+ * schema. Catches silent typos like `LocalPath` vs `localPath` — an unknown
+ * key is usually a misspelled known key that got silently ignored, leaving
+ * the user wondering why their config didn't take effect.
+ *
+ * Logs to stderr (console.error) since this runs inside module-level code
+ * at session_start; ctx.ui isn't reliably available yet.
+ */
+function warnUnknownKeys(block: unknown, blockName: string, knownKeys: readonly string[]): void {
+  if (!block || typeof block !== "object") return;
+  const unknown = Object.keys(block as Record<string, unknown>).filter((k) => !knownKeys.includes(k));
+  if (unknown.length === 0) return;
+  console.error(
+    `pi-memory: ignoring unknown key(s) in settings.json "${blockName}" block: ${unknown.join(", ")} (expected: ${knownKeys.join(", ")})`,
+  );
+}
+
+const PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection"] as const;
+const PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"] as const;
+
 export function resolveDbPath(cwd: string): string {
   // Try reading the local project settings for an explicit localPath override
   try {
@@ -85,12 +106,14 @@ export function resolveDbPath(cwd: string): string {
 
     // Package-specific override wins.
     const piMemory = settings?.["pi-memory"];
+    warnUnknownKeys(piMemory, "pi-memory", PI_MEMORY_KNOWN_KEYS);
     if (piMemory && typeof piMemory === "object" && typeof piMemory.localPath === "string" && piMemory.localPath) {
       return join(piMemory.localPath, "memory.db");
     }
 
     // pi-total-recall cascade.
     const piTotalRecall = settings?.["pi-total-recall"];
+    warnUnknownKeys(piTotalRecall, "pi-total-recall", PI_TOTAL_RECALL_KNOWN_KEYS);
     if (piTotalRecall && typeof piTotalRecall === "object" && typeof piTotalRecall.localPath === "string" && piTotalRecall.localPath) {
       return join(piTotalRecall.localPath, "memory", "memory.db");
     }
