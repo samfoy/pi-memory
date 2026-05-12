@@ -28,6 +28,29 @@ export type LessonInjectionMode = "all" | "selective";
 export interface InjectorConfig {
   lessonInjection?: LessonInjectionMode;
   /**
+   * Opt-in: restore per-user-message selective injection.
+   *
+   * When false (default), pi-memory injects a one-shot fallback block at
+   * session_start (correct message ordering, stable prefix cache).
+   *
+   * When true, the session_start dump is skipped and each turn runs a
+   * semantic search against the user's current prompt; the result is
+   * appended to `event.systemPrompt` in `before_agent_start`.
+   *
+   * Tradeoffs:
+   * - Pro: per-query relevance — facts outside the 8KB fallback dump reach
+   *   the model when they match the current prompt.
+   * - Con: the system prompt mutates every turn, invalidating the provider's
+   *   prefix cache after the system block (Bedrock / Anthropic cache_control).
+   *   Conversation suffix gets re-written at cacheWrite rates on every user
+   *   turn boundary (~12.5x cacheRead on Claude).
+   *
+   * Correctness is preserved either way: systemPrompt is a separate field
+   * from the messages list, so the user's question remains the last
+   * user-role message and the model responds to it.
+   */
+  selectiveInjection?: boolean;
+  /**
    * Model string passed to `pi --model` for session-end consolidation.
    * When omitted, the built-in default is used.  Useful for users on
    * non-Anthropic providers (OpenAI/Codex/OpenRouter/Ollama/local),

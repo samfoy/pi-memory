@@ -92,6 +92,24 @@ describe("readSettingsConfig", () => {
     assert.equal(cfg.consolidationModel, "openai/gpt-4.1-mini");
   });
 
+  it("reads selectiveInjection = true", () => {
+    writeProjectSettings({ memory: { selectiveInjection: true } });
+    const cfg = readSettingsConfig(tmpProject);
+    assert.equal(cfg.selectiveInjection, true);
+  });
+
+  it("reads selectiveInjection = false", () => {
+    writeProjectSettings({ memory: { selectiveInjection: false } });
+    const cfg = readSettingsConfig(tmpProject);
+    assert.equal(cfg.selectiveInjection, false);
+  });
+
+  it("ignores non-boolean selectiveInjection", () => {
+    writeProjectSettings({ memory: { selectiveInjection: "yes" } });
+    const cfg = readSettingsConfig(tmpProject);
+    assert.equal(cfg.selectiveInjection, undefined);
+  });
+
   it("returns undefined consolidationModel when no settings.json is present", () => {
     // Note: a global settings.json at ~/.pi/agent/settings.json *may* set a
     // value on the host; don't assert absolute equality. Assert that when

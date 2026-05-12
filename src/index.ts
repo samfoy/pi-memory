@@ -113,6 +113,9 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
   if (m.lessonInjection === "all" || m.lessonInjection === "selective") {
     config.lessonInjection = m.lessonInjection;
   }
+  if (typeof m.selectiveInjection === "boolean") {
+    config.selectiveInjection = m.selectiveInjection;
+  }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
     config.consolidationModel = m.consolidationModel.trim();
   }
@@ -126,6 +129,7 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
  * Example settings.json:
  * {
  *   "memory": {
+ *     "selectiveInjection": true,
  *     "lessonInjection": "selective",
  *     "consolidationModel": "openai/gpt-4.1-mini"
  *   }
@@ -221,6 +225,10 @@ export default function (pi: ExtensionAPI) {
       // Inject stored memory as a one-shot custom message BEFORE any user
       // message arrives. Matches pi-knowledge-search's pattern.
       //
+      // Skipped when `selectiveInjection: true` — in that mode the
+      // before_agent_start handler below takes over with per-turn semantic
+      // matching via systemPrompt mutation.
+      //
       // Historical note: v1.0.x mutated event.systemPrompt in before_agent_start.
       // That broke provider prefix caches on every turn boundary (any drift in
       // the system block re-writes the conversation suffix at cacheWrite rates).
@@ -231,32 +239,37 @@ export default function (pi: ExtensionAPI) {
       //
       // v1.2.0 injects once at session_start using fallback mode (all facts +
       // lessons, 8KB cap). Correct ordering, stable cache, simpler model.
-      // Loses per-user-message selective injection — a deliberate tradeoff.
-      try {
-        const alreadyInjected = ctx.sessionManager
-          .getEntries()
-          .some(
-            (e: SessionEntry) =>
-              e.type === "custom_message" && e.customType === "pi-memory-context",
-          );
-        if (!alreadyInjected) {
-          const { text, stats: injStats } = buildContextBlock(
-            store,
-            sessionCwd,
-            undefined, // no prompt → fallback: dump all relevant memory
-            injectorConfig,
-          );
-          if (text) {
-            pi.sendMessage({
-              customType: "pi-memory-context",
-              content: text,
-              display: false,
-              details: injStats,
-            });
+      //
+      // v1.3.0 adds `selectiveInjection: true` as an opt-in to restore v1.0.x
+      // per-turn selective behavior (mutates systemPrompt, breaks cache on
+      // every turn boundary — users opt in knowing the tradeoff).
+      if (!injectorConfig.selectiveInjection) {
+        try {
+          const alreadyInjected = ctx.sessionManager
+            .getEntries()
+            .some(
+              (e: SessionEntry) =>
+                e.type === "custom_message" && e.customType === "pi-memory-context",
+            );
+          if (!alreadyInjected) {
+            const { text, stats: injStats } = buildContextBlock(
+              store,
+              sessionCwd,
+              undefined, // no prompt → fallback: dump all relevant memory
+              injectorConfig,
+            );
+            if (text) {
+              pi.sendMessage({
+                customType: "pi-memory-context",
+                content: text,
+                display: false,
+                details: injStats,
+              });
+            }
           }
+        } catch {
+          // Injection is nice-to-have; never break startup over it.
         }
-      } catch {
-        // Injection is nice-to-have; never break startup over it.
       }
     } catch (err: any) {
       ctx.ui.notify(`pi-memory: failed to open store: ${err.message}`, "warning");
@@ -264,12 +277,28 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ----------------------------------------------------------------
-  // v1.2.0: per-turn memory injection was removed. The former
-  // before_agent_start handler appended memory context as a custom message
-  // AFTER the user's question, which caused the model to respond to the
-  // memory block instead of the user. Memory is now injected once at
-  // session_start (above) and lives at the top of conversation history.
+  // Opt-in per-turn selective injection (v1.3.0).
+  //
+  // When `selectiveInjection: true` is set, run a semantic search against the
+  // current user prompt and append matching memory to event.systemPrompt.
+  // MUST use systemPrompt (not { message }) — returning { message } puts the
+  // content AFTER the user message and causes the model to respond to the
+  // injected memory instead of the user. See v1.1.x postmortem.
+  //
+  // This breaks provider prefix caches on every turn boundary — an accepted
+  // cost for users who want per-query relevance from large memory stores.
   // ----------------------------------------------------------------
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!store) return;
+    if (!injectorConfig.selectiveInjection) return;
+
+    const { text } = buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
+    if (!text) return;
+
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${text}`,
+    };
+  });
 
 
   pi.on("agent_end", async (event, _ctx) => {

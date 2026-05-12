@@ -85,19 +85,41 @@ The injection happens at `session_start` via `pi.sendMessage`, not per-turn. Thi
 - **Cache stability.** Mutating the system prompt per turn (as earlier versions did) invalidates the provider's prefix cache after the system block (Bedrock / Anthropic `cache_control`), forcing the conversation suffix to be re-written at `cacheWrite` rates on every turn boundary.
 - **Simplicity.** One block, one time, cached for the whole session.
 
-Tradeoff: per-user-message selective injection (v1.0.x `lessonInjection: "selective"` behavior) is gone. The fallback dump covers preferences, project context for the cwd, tool preferences, lessons, and user identity — enough for typical workflows given the 8KB cap.
+Tradeoff: per-user-message selective injection is off by default — the fallback dump covers preferences, project context for the cwd, tool preferences, lessons, and user identity, which is enough for typical workflows given the 8KB cap. Users with large memory stores who want per-query relevance can opt in (see "Selective injection" below).
 
-**Selective lesson injection** — By default, all lessons are injected into every session. When you have many lessons across different domains, this can waste context. Enable selective mode to filter lessons by relevance:
+### Selective injection (opt-in)
+
+Set `selectiveInjection: true` to restore v1.0.x per-turn behavior:
 
 ```json
 {
   "memory": {
+    "selectiveInjection": true
+  }
+}
+```
+
+When enabled:
+
+- The session_start fallback dump is skipped.
+- Each user turn runs a semantic search against the current prompt, and the result is appended to the system prompt (not sent as a custom message — that would place it after the user's question in history).
+- Pro: facts outside the 8KB fallback dump reach the model when they match the current prompt.
+- Con: the system prompt mutates per turn, invalidating the provider's prefix cache after the system block (Bedrock / Anthropic `cache_control`). The conversation suffix gets re-cached at `cacheWrite` rates on every user-turn boundary (~12.5x `cacheRead` on Claude).
+
+Correctness is preserved either way: `systemPrompt` is a separate field from the messages list, so the user's question remains the last user-role message.
+
+**Lesson filtering in selective mode** — When `selectiveInjection: true`, the `lessonInjection` config takes effect:
+
+```json
+{
+  "memory": {
+    "selectiveInjection": true,
     "lessonInjection": "selective"
   }
 }
 ```
 
-Add this to `~/.pi/agent/settings.json`. In selective mode, lessons are filtered by:
+In `selective` lesson mode, lessons are filtered by:
 
 1. **Prompt relevance** — FTS search against the user's first message
 2. **Project context** — lessons matching the current working directory's project
@@ -106,9 +128,9 @@ Add this to `~/.pi/agent/settings.json`. In selective mode, lessons are filtered
 
 The result is capped at 15 most relevant lessons instead of all of them.
 
-| Mode | Behavior |
+| `lessonInjection` | Behavior (only when `selectiveInjection: true`) |
 |------|----------|
-| `"all"` (default) | Every lesson injected into every session |
+| `"all"` (default) | All lessons injected every turn |
 | `"selective"` | Only relevant lessons based on prompt, project, and category |
 
 **Consolidation model** — At session end, pi-memory spawns a lightweight `pi -p --print` process to extract facts and lessons from the conversation. By default it uses `claude-sonnet-4-20250514`, which is a no-op for users on non-Anthropic providers. Override it with any model string your `pi` binary accepts:
