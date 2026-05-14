@@ -17,7 +17,7 @@
  * - memory_lessons: list learned corrections
  * - memory_stats: show memory statistics
  */
-import type { ExtensionAPI, AgentToolResult, SessionEntry } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, AgentToolResult, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { join } from "node:path";
 import { homedir } from "node:os";
