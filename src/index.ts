@@ -17,7 +17,7 @@
  * - memory_lessons: list learned corrections
  * - memory_stats: show memory statistics
  */
-import type { ExtensionAPI, AgentToolResult, SessionEntry } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, AgentToolResult, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -203,7 +203,7 @@ export default function (pi: ExtensionAPI) {
     try {
       sessionCwd = ctx.cwd;
       cachedCtx = ctx;
-      sessionId = (ctx as any).sessionId ?? (ctx as any).session?.id;
+      sessionId = ctx.sessionManager.getSessionId();
 
       // Resolve per-agent DB path from local settings or cwd
       resolvedDbPath = resolveDbPath(sessionCwd);
@@ -220,7 +220,7 @@ export default function (pi: ExtensionAPI) {
         const branch = ctx.sessionManager.getBranch();
         for (const entry of branch) {
           if (entry.type !== "message") continue;
-          const msg = (entry as any).message;
+          const msg = entry.message;
           if (!msg) continue;
           if (msg.role === "user") {
             const text = extractText(msg.content);
@@ -458,7 +458,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
       limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
-    }) as any,
+    }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -486,7 +486,7 @@ export default function (pi: ExtensionAPI) {
       rule: Type.Optional(Type.String({ description: "Rule text for lessons" })),
       category: Type.Optional(Type.String({ description: "Category for lessons (default: general)" })),
       negative: Type.Optional(Type.Boolean({ description: "True if this is something to AVOID" })),
-    }) as any,
+    }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -535,7 +535,7 @@ export default function (pi: ExtensionAPI) {
       type: Type.String(),
       key: Type.Optional(Type.String({ description: "Key for facts" })),
       id: Type.Optional(Type.String({ description: "ID for lessons" })),
-    }) as any,
+    }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -571,7 +571,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       category: Type.Optional(Type.String({ description: "Filter by category" })),
       limit: Type.Optional(Type.Number({ description: "Max results (default 50)" })),
-    }) as any,
+    }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
@@ -592,7 +592,7 @@ export default function (pi: ExtensionAPI) {
     name: "memory_stats",
     label: "Memory Stats",
     description: "Show memory statistics — how many facts, lessons, and events are stored.",
-    parameters: Type.Object({}) as any,
+    parameters: Type.Object({}),
     async execute(_id, _params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
 
