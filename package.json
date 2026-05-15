@@ -10,10 +10,12 @@
     "preferences"
   ],
   "files": [
+    "dist",
     "src",
     "README.md",
     "LICENSE"
   ],
+  "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -21,12 +23,16 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "scripts": {
     "test": "node --test --import tsx src/**/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --packages=external --external:@mariozechner/pi-coding-agent --external:@earendil-works/pi-coding-agent --external:@sinclair/typebox",
+    "check": "tsc --noEmit",
+    "dev": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --watch --packages=external --external:@mariozechner/pi-coding-agent --external:@earendil-works/pi-coding-agent --external:@sinclair/typebox",
+    "prepare": "npm run build"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -35,6 +41,7 @@
   "devDependencies": {
     "@sinclair/typebox": "^0.34.48",
     "@types/node": "^22.15.21",
+    "esbuild": "^0.27.0",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }
