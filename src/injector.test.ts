@@ -57,6 +57,33 @@ describe("buildContextBlock", () => {
     assert.ok(!text.includes("other.lang"));
   });
 
+  it("fallback: excludes other-project facts even when user-set (confidence 0.95)", () => {
+    // User-set facts have confidence 0.95 — the old code included ALL such
+    // facts via `|| p.confidence >= 0.9`, bleeding unrelated project context.
+    store.setSemantic("project.rise.hosting", "GitLab — use glab CLI", 0.95, "user");
+    store.setSemantic("project.ttrpg.npc", "Read Mechanics/Goons.md before generating combat stats", 0.95, "user");
+    store.setSemantic("project.myapp.lang", "typescript", 0.95, "user");
+
+    const { text } = buildContextBlock(store, "/home/user/projects/myapp");
+    assert.ok(text.includes("myapp.lang"), "should include current project fact");
+    assert.ok(!text.includes("rise.hosting"), "should NOT include rise facts in myapp session");
+    assert.ok(!text.includes("ttrpg.npc"), "should NOT include ttrpg facts in myapp session");
+  });
+
+  it("fallback: exact slug match — short slug does not match longer key segment", () => {
+    // Regression: old substring check `key.includes('pi')` matched 'project.pipefittingjobs.*'
+    store.setSemantic("project.pipefittingjobs.source", "adzuna + jooble", 0.9, "user");
+    store.setSemantic("project.pi-memory.store", "sqlite via node:sqlite", 0.9, "user");
+
+    // In a session with cwd slug 'pi' (project named just 'pi'),
+    // pipefittingjobs should NOT appear.
+    // We simulate a cwd whose slug resolves to 'pi' exactly.
+    const { text } = buildContextBlock(store, "/home/user/projects/pi");
+    assert.ok(!text.includes("pipefittingjobs.source"), "slug 'pi' should not match 'pipefittingjobs'");
+    // pi-memory also shouldn't match 'pi' slug (different slug: 'pi-memory')
+    assert.ok(!text.includes("pi-memory.store"), "slug 'pi' should not match 'pi-memory'");
+  });
+
   // ─── Selective injection tests ───────────────────────────────────
 
   it("selective: searches by prompt and returns relevant entries", () => {
@@ -98,6 +125,18 @@ describe("buildContextBlock", () => {
     const { text } = buildContextBlock(store, undefined, "something totally unrelated xyz", { lessonInjection: "all" });
     assert.ok(text.includes("Learned Corrections"));
     assert.ok(text.includes("DON'T:"));
+  });
+
+  it("selective: excludes other-project facts even when FTS text matches", () => {
+    // Simulate a scenario where a Prisma-related fact from project 'rise' could
+    // match a prompt about prisma, but we're in a different project.
+    store.setSemantic("project.rise.testing", "use fabricca (from @repo/prisma/testing) for fixtures", 0.95, "user");
+    store.setSemantic("project.myapp.orm", "prisma with postgres", 0.95, "user");
+
+    // In myapp context: prompt mentions prisma — should get myapp fact, not rise
+    const { text } = buildContextBlock(store, "/home/user/projects/myapp", "how do I set up prisma migrations");
+    assert.ok(text.includes("myapp.orm"), "should include current project prisma fact");
+    assert.ok(!text.includes("rise.testing"), "should NOT include rise's prisma fact in myapp session");
   });
 
   it("selective: includes project context when cwd matches", () => {

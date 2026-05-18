@@ -99,12 +99,26 @@ function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string, c
     }
   }
 
-  if (results.length > 0) {
-    sections.push(formatSection("Relevant Memory", results.map(formatSemantic)));
-    semanticCount = results.length;
+  // Filter out project.* facts that belong to other projects.
+  // FTS can match project facts from unrelated projects when their text
+  // coincidentally matches the prompt (e.g. a prompt about "prisma" pulling
+  // in rise.testing.fabricca). Keep only facts whose project segment
+  // matches the current slug; non-project facts (pref.*, tool.*, user.*)
+  // are always kept.
+  const filteredResults = slug
+    ? results.filter(r => {
+        if (!r.key.startsWith("project.")) return true;
+        const parts = r.key.split(".");
+        return parts.length >= 2 && parts[1] === slug;
+      })
+    : results;
+
+  if (filteredResults.length > 0) {
+    sections.push(formatSection("Relevant Memory", filteredResults.map(formatSemantic)));
+    semanticCount = filteredResults.length;
 
     // Track access time for these memories
-    store.touchAccessed(results.map(r => r.key));
+    store.touchAccessed(filteredResults.map(r => r.key));
   }
 
   // Inject lessons — either all or filtered by relevance
@@ -197,8 +211,16 @@ function buildFallbackBlock(store: MemoryStore, cwd?: string): ContextBlock {
   }
 
   const projects = store.listSemantic("project.", 50);
-  const relevant = cwd
-    ? projects.filter(p => p.key.includes(projectSlug(cwd)) || p.confidence >= 0.9)
+  // Filter project facts to the current project only.
+  // Match by exact second key segment (project.<slug>.<rest>) rather than
+  // substring — avoids "pi" matching "project.pipefittingjobs.*" and prevents
+  // user-set facts (confidence 0.95) from bleeding into unrelated sessions.
+  const slug = cwd ? projectSlug(cwd) : "";
+  const relevant = slug
+    ? projects.filter(p => {
+        const parts = p.key.split(".");
+        return parts.length >= 2 && parts[1] === slug;
+      })
     : projects;
   if (relevant.length > 0) {
     sections.push(formatSection("Project Context", relevant.map(formatSemantic)));

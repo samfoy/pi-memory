@@ -19,7 +19,7 @@
  */
 import type { ExtensionAPI, AgentToolResult, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type, type TSchema } from "@sinclair/typebox";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { MemoryStore } from "./store.js";
@@ -108,14 +108,17 @@ export function resolveDbPath(cwd: string): string {
     const piMemory = settings?.["pi-memory"];
     warnUnknownKeys(piMemory, "pi-memory", PI_MEMORY_KNOWN_KEYS);
     if (piMemory && typeof piMemory === "object" && typeof piMemory.localPath === "string" && piMemory.localPath) {
-      return join(piMemory.localPath, "memory.db");
+      // resolve() handles both absolute and relative localPath values:
+      // absolute: resolve(cwd, '/abs/path', 'memory.db') → '/abs/path/memory.db'
+      // relative: resolve(cwd, '.pi/local', 'memory.db') → '{cwd}/.pi/local/memory.db'
+      return resolve(cwd, piMemory.localPath, "memory.db");
     }
 
     // pi-total-recall cascade.
     const piTotalRecall = settings?.["pi-total-recall"];
     warnUnknownKeys(piTotalRecall, "pi-total-recall", PI_TOTAL_RECALL_KNOWN_KEYS);
     if (piTotalRecall && typeof piTotalRecall === "object" && typeof piTotalRecall.localPath === "string" && piTotalRecall.localPath) {
-      return join(piTotalRecall.localPath, "memory", "memory.db");
+      return resolve(cwd, piTotalRecall.localPath, "memory", "memory.db");
     }
   } catch {
     // No local settings or parse error — use global default
@@ -418,6 +421,7 @@ export default function (pi: ExtensionAPI) {
         "-p", prompt,
         "--print",
         "--no-extensions",
+        "--no-tools",
         "--model", injectorConfig.consolidationModel ?? DEFAULT_CONSOLIDATION_MODEL,
       ], {
         timeout: EXEC_TIMEOUT_MS,

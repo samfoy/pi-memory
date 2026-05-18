@@ -71,9 +71,36 @@ describe("resolveDbPath", () => {
     assert.equal(resolveDbPath(tmpProject), DEFAULT_DB_PATH);
   });
 
-  it("returns {localPath}/memory.db when pi-memory.localPath is set", () => {
+  it("resolves relative pi-memory.localPath relative to cwd, not process CWD", () => {
+    writeProjectSettings({ "pi-memory": { localPath: ".pi/memory-local" } });
+    // Should resolve relative to the project root (tmpProject), not process.cwd()
+    assert.equal(
+      resolveDbPath(tmpProject),
+      path.resolve(tmpProject, ".pi/memory-local", "memory.db"),
+    );
+    // And it must NOT be relative to process.cwd() (which would be unpredictable)
+    assert.notEqual(
+      resolveDbPath(tmpProject),
+      path.join(".pi/memory-local", "memory.db"),
+    );
+  });
+
+  it("resolves relative pi-total-recall.localPath relative to cwd", () => {
+    writeProjectSettings({ "pi-total-recall": { localPath: ".pi/total-recall" } });
+    assert.equal(
+      resolveDbPath(tmpProject),
+      path.resolve(tmpProject, ".pi/total-recall", "memory", "memory.db"),
+    );
+    assert.notEqual(
+      resolveDbPath(tmpProject),
+      path.join(".pi/total-recall", "memory", "memory.db"),
+    );
+  });
+
+  it("absolute pi-memory.localPath still works after the resolve() fix", () => {
     writeProjectSettings({ "pi-memory": { localPath: tmpLocal } });
-    assert.equal(resolveDbPath(tmpProject), path.join(tmpLocal, "memory.db"));
+    // path.resolve(cwd, absolutePath, ...) should return absolutePath/... unchanged
+    assert.equal(resolveDbPath(tmpProject), path.resolve(tmpLocal, "memory.db"));
   });
 
   it("cascades from pi-total-recall.localPath to {base}/memory/memory.db", () => {
