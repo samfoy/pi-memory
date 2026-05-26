@@ -161,6 +161,42 @@ describe("MemoryStore", () => {
       const results = store.searchLessons("xyzzy12345 qqqqq", 10);
       assert.equal(results.length, 0);
     });
+
+    it("project field is null when not provided", () => {
+      const { id } = store.addLesson("Global rule with no project", "general", "user", false);
+      const lesson = store.getLesson(id!);
+      assert.ok(lesson);
+      assert.equal(lesson.project, null);
+    });
+
+    it("project field is stored when provided", () => {
+      const { id } = store.addLesson("Always use fabricca fixtures", "testing", "consolidation", false, "rise");
+      const lesson = store.getLesson(id!);
+      assert.ok(lesson);
+      assert.equal(lesson.project, "rise");
+    });
+
+    it("listLessons with project filter excludes other-project lessons", () => {
+      store.addLesson("Use fabricca for rise fixtures", "testing", "consolidation", false, "rise");
+      store.addLesson("Use pytest fixtures for myapp", "testing", "consolidation", false, "myapp");
+      store.addLesson("Always write tests", "general", "user", false); // null project
+
+      const forMyapp = store.listLessons(undefined, 50, "myapp");
+      const rules = forMyapp.map(l => l.rule);
+      assert.ok(rules.some(r => r.includes("pytest")), "should include myapp lesson");
+      assert.ok(rules.some(r => r.includes("Always write tests")), "should include null-project lesson");
+      assert.ok(!rules.some(r => r.includes("fabricca")), "should exclude rise lesson");
+    });
+
+    it("listLessons with no project filter returns all", () => {
+      store.addLesson("Rise-specific rule", "testing", "consolidation", false, "rise");
+      store.addLesson("Global rule", "general", "user", false);
+
+      const all = store.listLessons(undefined, 50);
+      const rules = all.map(l => l.rule);
+      assert.ok(rules.some(r => r.includes("Rise-specific")));
+      assert.ok(rules.some(r => r.includes("Global rule")));
+    });
   });
 
   describe("events", () => {

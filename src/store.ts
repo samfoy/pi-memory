@@ -28,6 +28,8 @@ export interface LessonEntry {
   source: string;
   negative: boolean;
   created_at: string;
+  /** Project slug this lesson was extracted from, or null for user-authored / global lessons */
+  project: string | null;
 }
 
 export interface MemoryEvent {
@@ -91,6 +93,12 @@ export class MemoryStore {
     // Migration: add last_accessed column if missing
     try {
       this.db.exec(`ALTER TABLE semantic ADD COLUMN last_accessed TEXT`);
+    } catch {
+      // Column already exists — ignore
+    }
+    // Migration: add project column to lessons if missing
+    try {
+      this.db.exec(`ALTER TABLE lessons ADD COLUMN project TEXT`);
     } catch {
       // Column already exists — ignore
     }
@@ -254,7 +262,7 @@ export class MemoryStore {
 
   // ─── Lessons ─────────────────────────────────────────────────────
 
-  addLesson(rule: string, category: string = "general", source: string = "consolidation", negative: boolean = false): { success: boolean; id?: string; reason?: string } {
+  addLesson(rule: string, category: string = "general", source: string = "consolidation", negative: boolean = false, project?: string): { success: boolean; id?: string; reason?: string } {
     const trimmed = rule.trim();
     if (!trimmed) return { success: false, reason: "empty rule" };
 
@@ -277,8 +285,8 @@ export class MemoryStore {
 
       const id = crypto.randomUUID();
       this.db.prepare(
-        "INSERT INTO lessons (id, rule, category, source, negative) VALUES (?, ?, ?, ?, ?)"
-      ).run(id, trimmed, normalizedCategory, source, negative ? 1 : 0);
+        "INSERT INTO lessons (id, rule, category, source, negative, project) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(id, trimmed, normalizedCategory, source, negative ? 1 : 0, project ?? null);
 
       this.logEvent("create", "lesson", id, trimmed.slice(0, 100));
       return { success: true as const, id };
@@ -291,17 +299,34 @@ export class MemoryStore {
     return { ...row, negative: !!row.negative };
   }
 
-  listLessons(category?: string, limit: number = 50): LessonEntry[] {
+  /**
+   * List lessons, optionally filtered by category and/or project.
+   *
+   * Project filtering:
+   * - If `project` is provided, returns lessons where `project = slug` OR `project IS NULL`
+   *   (NULL = user-authored or pre-migration lessons, treated as global).
+   * - If `project` is not provided, returns all lessons (no project filter).
+   */
+  listLessons(category?: string, limit: number = 50, project?: string): LessonEntry[] {
     let rows: any[];
-    if (category) {
+    if (category && project) {
+      const normalizedCategory = category.trim().toLowerCase();
+      rows = this.db.prepare(
+        "SELECT * FROM lessons WHERE category = ? AND (project = ? OR project IS NULL) AND is_deleted = 0 ORDER BY created_at DESC LIMIT ?"
+      ).all(normalizedCategory, project, limit);
+    } else if (category) {
       const normalizedCategory = category.trim().toLowerCase();
       rows = this.db.prepare("SELECT * FROM lessons WHERE category = ? AND is_deleted = 0 ORDER BY created_at DESC LIMIT ?")
         .all(normalizedCategory, limit);
+    } else if (project) {
+      rows = this.db.prepare(
+        "SELECT * FROM lessons WHERE (project = ? OR project IS NULL) AND is_deleted = 0 ORDER BY created_at DESC LIMIT ?"
+      ).all(project, limit);
     } else {
       rows = this.db.prepare("SELECT * FROM lessons WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT ?")
         .all(limit);
     }
-    return rows.map(r => ({ ...r, negative: !!r.negative }));
+    return rows.map(r => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
   }
 
   /**
@@ -318,7 +343,7 @@ export class MemoryStore {
 
     try {
       const rows = this.db.prepare(`
-        SELECT l.id, l.rule, l.category, l.source, l.negative, l.created_at
+        SELECT l.id, l.rule, l.category, l.source, l.negative, l.created_at, l.project
         FROM lessons l
         JOIN lessons_fts fts ON l.rowid = fts.rowid
         WHERE lessons_fts MATCH ? AND l.is_deleted = 0
@@ -326,7 +351,7 @@ export class MemoryStore {
         LIMIT ?
       `).all(ftsQuery, limit) as any[];
 
-      return rows.map(r => ({ ...r, negative: !!r.negative }));
+      return rows.map(r => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
     } catch {
       return this._searchLessonsFallback(query, limit);
     }
@@ -341,7 +366,7 @@ export class MemoryStore {
       .map(entry => {
         const text = `${entry.rule} ${entry.category}`.toLowerCase();
         const matches = terms.filter(t => text.includes(t)).length;
-        return { entry: { ...entry, negative: !!entry.negative } as LessonEntry, score: matches / terms.length };
+        return { entry: { ...entry, negative: !!entry.negative, project: entry.project ?? null } as LessonEntry, score: matches / terms.length };
       })
       .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score)

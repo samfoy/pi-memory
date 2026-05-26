@@ -177,8 +177,10 @@ export function parseConsolidationResponse(text: string): ExtractedMemory {
 
 /**
  * Apply extracted memory to the store, filtering out derivable/ephemeral entries.
+ * Project-scoped lessons (from consolidation) are tagged with the current project slug
+ * so they are only injected when working in that project.
  */
-export function applyExtracted(store: MemoryStore, extracted: ExtractedMemory, source: string = "consolidation"): { semantic: number; lessons: number } {
+export function applyExtracted(store: MemoryStore, extracted: ExtractedMemory, source: string = "consolidation", project?: string): { semantic: number; lessons: number } {
   let semanticCount = 0;
   let lessonCount = 0;
 
@@ -190,7 +192,11 @@ export function applyExtracted(store: MemoryStore, extracted: ExtractedMemory, s
 
   for (const l of extracted.lessons) {
     if (isDerivableLesson(l.rule)) continue;
-    const result = store.addLesson(l.rule, l.category, source, l.negative);
+    // Tag consolidated lessons with the project slug so they don't leak into
+    // unrelated project sessions. User-authored lessons (source="user") are
+    // not tagged — they're intentionally global.
+    const lessonProject = source === "user" ? undefined : project;
+    const result = store.addLesson(l.rule, l.category, source, l.negative, lessonProject);
     if (result.success) lessonCount++;
   }
 

@@ -23,7 +23,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { MemoryStore } from "./store.js";
-import { buildContextBlock, type InjectorConfig } from "./injector.js";
+import { buildContextBlock, projectSlug, type InjectorConfig } from "./injector.js";
 
 type ToolResult = AgentToolResult<unknown>;
 function ok(text: string): ToolResult { return { content: [{ type: "text", text }], details: {} }; }
@@ -440,7 +440,8 @@ export default function (pi: ExtensionAPI) {
 
       if (result.code === 0 && result.stdout) {
         const extracted = parseConsolidationResponse(result.stdout);
-        const applied = applyExtracted(store!, extracted, `session:${sessionId ?? "unknown"}`);
+        const slug = sessionCwd ? projectSlug(sessionCwd) : undefined;
+        const applied = applyExtracted(store!, extracted, `session:${sessionId ?? "unknown"}`, slug || undefined);
         if (applied.semantic + applied.lessons > 0) {
           // Log but don't notify — we're shutting down
           console.error(`pi-memory: consolidated ${applied.semantic} facts, ${applied.lessons} lessons`);

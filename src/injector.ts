@@ -121,10 +121,10 @@ function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string, c
     store.touchAccessed(filteredResults.map(r => r.key));
   }
 
-  // Inject lessons — either all or filtered by relevance
+  // Inject lessons — either all or filtered by relevance + project scope
   const lessons = mode === "selective"
     ? getRelevantLessons(store, prompt, cwd)
-    : store.listLessons(undefined, 50);
+    : store.listLessons(undefined, 50, slug || undefined);
 
   if (lessons.length > 0) {
     const corrections = lessons.filter(l => l.negative);
@@ -233,7 +233,7 @@ function buildFallbackBlock(store: MemoryStore, cwd?: string): ContextBlock {
     semanticCount += tools.length;
   }
 
-  const lessons = store.listLessons(undefined, 50);
+  const lessons = store.listLessons(undefined, 50, slug || undefined);
   if (lessons.length > 0) {
     const corrections = lessons.filter(l => l.negative);
     const positives = lessons.filter(l => !l.negative);
@@ -320,7 +320,7 @@ const MEMORY_DRIFT_CAVEAT = `## Before acting on memory
 - If a recalled memory conflicts with what you observe in the current code or project state, trust what you observe now.
 - Memories about project state (deadlines, decisions, architecture) decay fastest — check if still relevant.`;
 
-function projectSlug(cwd: string): string {
+export function projectSlug(cwd: string): string {
   const parts = cwd.split("/").filter(Boolean);
   const skip = new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().username]);
   for (const p of parts.reverse()) {
