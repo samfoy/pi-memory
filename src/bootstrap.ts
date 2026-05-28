@@ -106,7 +106,7 @@ ${batch.map((s, j) => `### Session ${j + 1}\n${s}`).join("\n\n")}`;
     // pitfalls. Matches the runtime path in index.ts which uses pi.exec(argv).
     const result = execFileSync(
       "pi",
-      ["-p", prompt, "--print"],
+      ["-p", prompt, "--print", "--no-extensions", "--no-tools", "--no-session"],
       { encoding: "utf8", timeout: 120_000, cwd: homedir(), maxBuffer: 1024 * 1024 }
     );
 
