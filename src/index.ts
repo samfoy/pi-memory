@@ -422,6 +422,7 @@ export default function (pi: ExtensionAPI) {
         "--print",
         "--no-extensions",
         "--no-tools",
+        "--no-session",
         "--model", injectorConfig.consolidationModel ?? DEFAULT_CONSOLIDATION_MODEL,
       ], {
         timeout: EXEC_TIMEOUT_MS,
