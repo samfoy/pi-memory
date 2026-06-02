@@ -228,7 +228,11 @@ export class MemoryStore {
         LIMIT ?
       `).all(ftsQuery, limit) as unknown as SemanticEntry[];
 
-      return rows;
+      // FTS5 tokenizes on whitespace/punctuation, so CJK text without spaces
+      // won't match substrings (e.g. searching "小米" won't hit "查询小米").
+      // Fall back to LIKE-based substring search when FTS returns nothing.
+      if (rows.length > 0) return rows;
+      return this._searchSemanticFallback(query, limit);
     } catch {
       // FTS query failed — fall back to substring matching
       return this._searchSemanticFallback(query, limit);
@@ -351,7 +355,11 @@ export class MemoryStore {
         LIMIT ?
       `).all(ftsQuery, limit) as any[];
 
-      return rows.map(r => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
+      const mapped = rows.map(r => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
+
+      // Same CJK fallback as searchSemantic — FTS won't match CJK substrings.
+      if (mapped.length > 0) return mapped;
+      return this._searchLessonsFallback(query, limit);
     } catch {
       return this._searchLessonsFallback(query, limit);
     }
