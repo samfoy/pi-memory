@@ -126,6 +126,12 @@ export class MemoryStore {
     } catch {
       // Column already exists — ignore
     }
+    // Migration: add embedding column for semantic vector search
+    try {
+      this.db.exec(`ALTER TABLE semantic ADD COLUMN embedding BLOB`);
+    } catch {
+      // Column already exists — ignore
+    }
 
     // FTS5 virtual tables for semantic + lesson search (optional — node:sqlite may lack FTS5)
     try {
@@ -222,6 +228,27 @@ export class MemoryStore {
       if (result.changes > 0) this.logEvent("delete", "semantic", normalized);
       return result.changes > 0;
     });
+  }
+
+  /**
+   * Store a pre-computed embedding for a key.
+   * Converts Float32Array → Buffer for SQLite BLOB storage.
+   */
+  setEmbedding(key: string, embedding: Float32Array): void {
+    const normalized = key.toLowerCase();
+    const blob = Buffer.from(new Uint8Array(embedding.buffer, embedding.byteOffset, embedding.byteLength));
+    this.db.prepare("UPDATE semantic SET embedding = ? WHERE key = ?").run(blob, normalized);
+  }
+
+  /**
+   * Return all semantic keys with their raw embedding BLOBs.
+   * Used for in-memory cosine similarity at query time.
+   * Entries without an embedding have embedding = null.
+   */
+  getAllEmbeddings(): Array<{ key: string; embedding: Buffer | null }> {
+    return this.db
+      .prepare("SELECT key, embedding FROM semantic ORDER BY updated_at DESC")
+      .all() as unknown as Array<{ key: string; embedding: Buffer | null }>;
   }
 
   listSemantic(prefix?: string, limit: number = 100): SemanticEntry[] {

@@ -1,6 +1,6 @@
 // src/index.ts
 import { Type } from "@sinclair/typebox";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 
@@ -53,6 +53,14 @@ var MemoryStore = class {
     `);
     try {
       this.db.exec(`ALTER TABLE semantic ADD COLUMN last_accessed TEXT`);
+    } catch {
+    }
+    try {
+      this.db.exec(`ALTER TABLE lessons ADD COLUMN project TEXT`);
+    } catch {
+    }
+    try {
+      this.db.exec(`ALTER TABLE semantic ADD COLUMN embedding BLOB`);
     } catch {
     }
     try {
@@ -136,6 +144,23 @@ var MemoryStore = class {
       return result.changes > 0;
     });
   }
+  /**
+   * Store a pre-computed embedding for a key.
+   * Converts Float32Array → Buffer for SQLite BLOB storage.
+   */
+  setEmbedding(key, embedding) {
+    const normalized = key.toLowerCase();
+    const blob = Buffer.from(new Uint8Array(embedding.buffer, embedding.byteOffset, embedding.byteLength));
+    this.db.prepare("UPDATE semantic SET embedding = ? WHERE key = ?").run(blob, normalized);
+  }
+  /**
+   * Return all semantic keys with their raw embedding BLOBs.
+   * Used for in-memory cosine similarity at query time.
+   * Entries without an embedding have embedding = null.
+   */
+  getAllEmbeddings() {
+    return this.db.prepare("SELECT key, embedding FROM semantic ORDER BY updated_at DESC").all();
+  }
   listSemantic(prefix, limit = 100) {
     if (prefix) {
       return this.db.prepare("SELECT * FROM semantic WHERE key LIKE ? ORDER BY updated_at DESC LIMIT ?").all(`${prefix}%`, limit);
@@ -179,7 +204,7 @@ var MemoryStore = class {
     }
   }
   // ─── Lessons ─────────────────────────────────────────────────────
-  addLesson(rule, category = "general", source = "consolidation", negative = false) {
+  addLesson(rule, category = "general", source = "consolidation", negative = false, project) {
     const trimmed = rule.trim();
     if (!trimmed) return { success: false, reason: "empty rule" };
     const normalizedCategory = category.trim().toLowerCase() || "general";
@@ -196,8 +221,8 @@ var MemoryStore = class {
       }
       const id = crypto.randomUUID();
       this.db.prepare(
-        "INSERT INTO lessons (id, rule, category, source, negative) VALUES (?, ?, ?, ?, ?)"
-      ).run(id, trimmed, normalizedCategory, source, negative ? 1 : 0);
+        "INSERT INTO lessons (id, rule, category, source, negative, project) VALUES (?, ?, ?, ?, ?, ?)"
+      ).run(id, trimmed, normalizedCategory, source, negative ? 1 : 0, project ?? null);
       this.logEvent("create", "lesson", id, trimmed.slice(0, 100));
       return { success: true, id };
     });
@@ -207,15 +232,32 @@ var MemoryStore = class {
     if (!row) return void 0;
     return { ...row, negative: !!row.negative };
   }
-  listLessons(category, limit = 50) {
+  /**
+   * List lessons, optionally filtered by category and/or project.
+   *
+   * Project filtering:
+   * - If `project` is provided, returns lessons where `project = slug` OR `project IS NULL`
+   *   (NULL = user-authored or pre-migration lessons, treated as global).
+   * - If `project` is not provided, returns all lessons (no project filter).
+   */
+  listLessons(category, limit = 50, project) {
     let rows;
-    if (category) {
+    if (category && project) {
+      const normalizedCategory = category.trim().toLowerCase();
+      rows = this.db.prepare(
+        "SELECT * FROM lessons WHERE category = ? AND (project = ? OR project IS NULL) AND is_deleted = 0 ORDER BY created_at DESC LIMIT ?"
+      ).all(normalizedCategory, project, limit);
+    } else if (category) {
       const normalizedCategory = category.trim().toLowerCase();
       rows = this.db.prepare("SELECT * FROM lessons WHERE category = ? AND is_deleted = 0 ORDER BY created_at DESC LIMIT ?").all(normalizedCategory, limit);
+    } else if (project) {
+      rows = this.db.prepare(
+        "SELECT * FROM lessons WHERE (project = ? OR project IS NULL) AND is_deleted = 0 ORDER BY created_at DESC LIMIT ?"
+      ).all(project, limit);
     } else {
       rows = this.db.prepare("SELECT * FROM lessons WHERE is_deleted = 0 ORDER BY created_at DESC LIMIT ?").all(limit);
     }
-    return rows.map((r) => ({ ...r, negative: !!r.negative }));
+    return rows.map((r) => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
   }
   /**
    * Search lessons by relevance to a query. Uses FTS5 when available,
@@ -228,14 +270,14 @@ var MemoryStore = class {
     const ftsQuery = terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ");
     try {
       const rows = this.db.prepare(`
-        SELECT l.id, l.rule, l.category, l.source, l.negative, l.created_at
+        SELECT l.id, l.rule, l.category, l.source, l.negative, l.created_at, l.project
         FROM lessons l
         JOIN lessons_fts fts ON l.rowid = fts.rowid
         WHERE lessons_fts MATCH ? AND l.is_deleted = 0
         ORDER BY bm25(lessons_fts)
         LIMIT ?
       `).all(ftsQuery, limit);
-      return rows.map((r) => ({ ...r, negative: !!r.negative }));
+      return rows.map((r) => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
     } catch {
       return this._searchLessonsFallback(query, limit);
     }
@@ -247,7 +289,7 @@ var MemoryStore = class {
     return all.map((entry) => {
       const text = `${entry.rule} ${entry.category}`.toLowerCase();
       const matches = terms.filter((t) => text.includes(t)).length;
-      return { entry: { ...entry, negative: !!entry.negative }, score: matches / terms.length };
+      return { entry: { ...entry, negative: !!entry.negative, project: entry.project ?? null }, score: matches / terms.length };
     }).filter(({ score }) => score > 0).sort((a, b) => b.score - a.score).slice(0, limit).map(({ entry }) => entry);
   }
   deleteLesson(id) {
@@ -294,18 +336,85 @@ function jaccard(a, b) {
   return intersection.size / union.size;
 }
 
+// src/embedder.ts
+var MODEL = "Xenova/all-MiniLM-L6-v2";
+var LOAD_TIMEOUT_MS = 3e4;
+var INFER_TIMEOUT_MS = 5e3;
+var TEXT_CHAR_LIMIT = 512;
+var _pipe = null;
+var _failed = false;
+async function getPipe() {
+  if (_failed) return null;
+  if (_pipe) return _pipe;
+  try {
+    const pkg = "@xenova/transformers";
+    const mod = await import(pkg).catch(() => null);
+    if (!mod) {
+      console.error("pi-memory: @xenova/transformers not installed, semantic search disabled");
+      _failed = true;
+      return null;
+    }
+    const { pipeline, env } = mod;
+    env.allowRemoteModels = true;
+    env.useBrowserCache = false;
+    _pipe = await withTimeout(
+      pipeline("feature-extraction", MODEL, { quantized: true }),
+      LOAD_TIMEOUT_MS,
+      "model load"
+    );
+    return _pipe;
+  } catch (err) {
+    console.error(`pi-memory: embedder unavailable (${err?.message ?? err}), using FTS-only`);
+    _failed = true;
+    return null;
+  }
+}
+async function embed(text) {
+  const pipe = await getPipe();
+  if (!pipe) return null;
+  try {
+    const out = await withTimeout(
+      pipe(text.slice(0, TEXT_CHAR_LIMIT), { pooling: "mean", normalize: true }),
+      INFER_TIMEOUT_MS,
+      "inference"
+    );
+    return new Float32Array(out.data);
+  } catch {
+    return null;
+  }
+}
+function similarity(a, b) {
+  let dot = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) dot += a[i] * b[i];
+  return dot;
+}
+function fromBlob(b) {
+  if (!b) return null;
+  const raw = Uint8Array.from(b);
+  return new Float32Array(raw.buffer);
+}
+function withTimeout(p, ms, label) {
+  return Promise.race([
+    p,
+    new Promise(
+      (_, reject) => setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
+    )
+  ]);
+}
+
 // src/injector.ts
 import os from "node:os";
 var MAX_CONTEXT_CHARS = 8e3;
 var SEARCH_LIMIT = 15;
 var LESSON_SEARCH_LIMIT = 15;
-function buildContextBlock(store, cwd, prompt, config) {
+async function buildContextBlock(store, cwd, prompt, config) {
   if (prompt?.trim()) {
     return buildSelectiveBlock(store, prompt, cwd, config);
   }
   return buildFallbackBlock(store, cwd);
 }
-function buildSelectiveBlock(store, prompt, cwd, config) {
+async function buildSelectiveBlock(store, prompt, cwd, config) {
   const sections = [];
   let semanticCount = 0;
   let lessonCount = 0;
@@ -314,20 +423,82 @@ function buildSelectiveBlock(store, prompt, cwd, config) {
   const slug = cwd ? projectSlug(cwd) : "";
   if (slug) {
     const projectResults = store.searchSemantic(slug, 5);
-    const seen = new Set(results.map((r) => r.key));
+    const seen2 = new Set(results.map((r) => r.key));
     for (const r of projectResults) {
-      if (!seen.has(r.key)) {
+      if (!seen2.has(r.key)) {
         results.push(r);
-        seen.add(r.key);
+        seen2.add(r.key);
       }
     }
   }
-  if (results.length > 0) {
-    sections.push(formatSection("Relevant Memory", results.map(formatSemantic)));
-    semanticCount = results.length;
-    store.touchAccessed(results.map((r) => r.key));
+  const filteredResults = slug ? results.filter((r) => {
+    if (!r.key.startsWith("project.")) return true;
+    const parts = r.key.split(".");
+    return parts.length >= 2 && parts[1] === slug;
+  }) : results;
+  const seen = new Set(filteredResults.map((r) => r.key));
+  const SEMANTIC_THRESHOLD = 0.25;
+  const SEMANTIC_LIMIT = 8;
+  const allEmbs = store.getAllEmbeddings();
+  const promptVec = await embed(prompt);
+  const semanticKeys = /* @__PURE__ */ new Set();
+  if (promptVec) {
+    const semanticHits = allEmbs.flatMap(({ key, embedding }) => {
+      const vec = fromBlob(embedding);
+      if (!vec) return [];
+      const score = similarity(promptVec, vec);
+      return score >= SEMANTIC_THRESHOLD ? [{ key, score }] : [];
+    }).sort((a, b) => b.score - a.score).slice(0, SEMANTIC_LIMIT);
+    for (const { key } of semanticHits) {
+      semanticKeys.add(key);
+      if (!seen.has(key)) {
+        const entry = store.getSemantic(key);
+        if (entry) {
+          filteredResults.push(entry);
+          seen.add(key);
+        }
+      }
+    }
+    backfillEmbeddings(store, allEmbs.filter((r) => !r.embedding)).catch(() => {
+    });
   }
-  const lessons = mode === "selective" ? getRelevantLessons(store, prompt, cwd) : store.listLessons(void 0, 50);
+  const expandedPrefixes = /* @__PURE__ */ new Set();
+  for (const r of [...filteredResults]) {
+    const prefix = keyDomainPrefix(r.key);
+    if (!prefix || expandedPrefixes.has(prefix)) continue;
+    expandedPrefixes.add(prefix);
+    const limit = semanticKeys.has(r.key) ? 20 : 5;
+    for (const sibling of store.listSemantic(prefix, limit)) {
+      if (!seen.has(sibling.key)) {
+        filteredResults.push(sibling);
+        seen.add(sibling.key);
+      }
+    }
+  }
+  if (semanticKeys.size > 0) {
+    const semanticPrefixes = /* @__PURE__ */ new Set();
+    for (const k of semanticKeys) {
+      const p = keyDomainPrefix(k);
+      if (p) semanticPrefixes.add(p);
+    }
+    const isSemanticRelated = (key) => {
+      if (semanticKeys.has(key)) return true;
+      const p = keyDomainPrefix(key);
+      return p ? semanticPrefixes.has(p) : false;
+    };
+    const priority = filteredResults.filter((r) => isSemanticRelated(r.key));
+    const rest = filteredResults.filter((r) => !isSemanticRelated(r.key));
+    priority.sort((a, b) => a.key.localeCompare(b.key));
+    rest.sort((a, b) => a.key.localeCompare(b.key));
+    filteredResults.length = 0;
+    filteredResults.push(...priority, ...rest);
+  }
+  if (filteredResults.length > 0) {
+    sections.push(formatSection("Relevant Memory", filteredResults.map(formatSemantic)));
+    semanticCount = filteredResults.length;
+    store.touchAccessed(filteredResults.map((r) => r.key));
+  }
+  const lessons = mode === "selective" ? getRelevantLessons(store, prompt, cwd) : store.listLessons(void 0, 50, slug || void 0);
   if (lessons.length > 0) {
     const corrections = lessons.filter((l) => l.negative);
     const positives = lessons.filter((l) => !l.negative);
@@ -387,7 +558,11 @@ function buildFallbackBlock(store, cwd) {
     semanticCount += prefs.length;
   }
   const projects = store.listSemantic("project.", 50);
-  const relevant = cwd ? projects.filter((p) => p.key.includes(projectSlug(cwd)) || p.confidence >= 0.9) : projects;
+  const slug = cwd ? projectSlug(cwd) : "";
+  const relevant = slug ? projects.filter((p) => {
+    const parts = p.key.split(".");
+    return parts.length >= 2 && parts[1] === slug;
+  }) : projects;
   if (relevant.length > 0) {
     sections.push(formatSection("Project Context", relevant.map(formatSemantic)));
     semanticCount += relevant.length;
@@ -397,7 +572,7 @@ function buildFallbackBlock(store, cwd) {
     sections.push(formatSection("Tool Preferences", tools.map(formatSemantic)));
     semanticCount += tools.length;
   }
-  const lessons = store.listLessons(void 0, 50);
+  const lessons = store.listLessons(void 0, 50, slug || void 0);
   if (lessons.length > 0) {
     const corrections = lessons.filter((l) => l.negative);
     const positives = lessons.filter((l) => !l.negative);
@@ -458,6 +633,20 @@ var MEMORY_DRIFT_CAVEAT = `## Before acting on memory
 - Memory records can become stale. If a memory names a file, function, or flag \u2014 verify it still exists before recommending it. "The memory says X exists" is not the same as "X exists now."
 - If a recalled memory conflicts with what you observe in the current code or project state, trust what you observe now.
 - Memories about project state (deadlines, decisions, architecture) decay fastest \u2014 check if still relevant.`;
+function keyDomainPrefix(key) {
+  const parts = key.split(".");
+  return parts.length >= 3 ? parts.slice(0, 2).join(".") : null;
+}
+async function backfillEmbeddings(store, missing) {
+  if (missing.length === 0) return;
+  for (const { key } of missing.slice(0, 10)) {
+    const entry = store.getSemantic(key);
+    if (!entry) continue;
+    const displayKey = key.split(".").slice(1).join(" ");
+    const vec = await embed(`${displayKey} ${entry.value}`);
+    if (vec) store.setEmbedding(key, vec);
+  }
+}
 function projectSlug(cwd) {
   const parts = cwd.split("/").filter(Boolean);
   const skip = /* @__PURE__ */ new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().username]);
@@ -594,7 +783,7 @@ function parseConsolidationResponse(text) {
     return { semantic: [], lessons: [] };
   }
 }
-function applyExtracted(store, extracted, source = "consolidation") {
+function applyExtracted(store, extracted, source = "consolidation", project) {
   let semanticCount = 0;
   let lessonCount = 0;
   for (const s of extracted.semantic) {
@@ -604,7 +793,8 @@ function applyExtracted(store, extracted, source = "consolidation") {
   }
   for (const l of extracted.lessons) {
     if (isDerivableLesson(l.rule)) continue;
-    const result = store.addLesson(l.rule, l.category, source, l.negative);
+    const lessonProject = source === "user" ? void 0 : project;
+    const result = store.addLesson(l.rule, l.category, source, l.negative, lessonProject);
     if (result.success) lessonCount++;
   }
   return { semantic: semanticCount, lessons: lessonCount };
@@ -680,12 +870,12 @@ function resolveDbPath(cwd) {
     const piMemory = settings?.["pi-memory"];
     warnUnknownKeys(piMemory, "pi-memory", PI_MEMORY_KNOWN_KEYS);
     if (piMemory && typeof piMemory === "object" && typeof piMemory.localPath === "string" && piMemory.localPath) {
-      return join(piMemory.localPath, "memory.db");
+      return resolve(cwd, piMemory.localPath, "memory.db");
     }
     const piTotalRecall = settings?.["pi-total-recall"];
     warnUnknownKeys(piTotalRecall, "pi-total-recall", PI_TOTAL_RECALL_KNOWN_KEYS);
     if (piTotalRecall && typeof piTotalRecall === "object" && typeof piTotalRecall.localPath === "string" && piTotalRecall.localPath) {
-      return join(piTotalRecall.localPath, "memory", "memory.db");
+      return resolve(cwd, piTotalRecall.localPath, "memory", "memory.db");
     }
   } catch {
   }
@@ -767,13 +957,13 @@ function index_default(pi) {
           }
         }, 5e3);
       }
-      if (!injectorConfig.perTurnInjection) {
+      if (injectorConfig.perTurnInjection === false) {
         try {
           const alreadyInjected = ctx.sessionManager.getEntries().some(
             (e) => e.type === "custom_message" && e.customType === "pi-memory-context"
           );
           if (!alreadyInjected) {
-            const { text, stats: injStats } = buildContextBlock(
+            const { text, stats: injStats } = await buildContextBlock(
               store,
               sessionCwd,
               void 0,
@@ -798,8 +988,8 @@ function index_default(pi) {
   });
   pi.on("before_agent_start", async (event, ctx) => {
     if (!store) return;
-    if (!injectorConfig.perTurnInjection) return;
-    const { text } = buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
+    if (injectorConfig.perTurnInjection === false) return;
+    const { text } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
     if (!text) return;
     return {
       systemPrompt: `${event.systemPrompt}
@@ -875,6 +1065,8 @@ ${text}`
         prompt,
         "--print",
         "--no-extensions",
+        "--no-tools",
+        "--no-session",
         "--model",
         injectorConfig.consolidationModel ?? DEFAULT_CONSOLIDATION_MODEL
       ], {
@@ -892,7 +1084,8 @@ ${text}`
       ]);
       if (result.code === 0 && result.stdout) {
         const extracted = parseConsolidationResponse(result.stdout);
-        const applied = applyExtracted(store, extracted, `session:${sessionId ?? "unknown"}`);
+        const slug = sessionCwd ? projectSlug(sessionCwd) : void 0;
+        const applied = applyExtracted(store, extracted, `session:${sessionId ?? "unknown"}`, slug || void 0);
         if (applied.semantic + applied.lessons > 0) {
           console.error(`pi-memory: consolidated ${applied.semantic} facts, ${applied.lessons} lessons`);
         }
@@ -952,6 +1145,12 @@ ${text}`
           return ok("Both key and value required for facts");
         }
         store.setSemantic(params.key, params.value, 0.95, "user");
+        const _key = params.key;
+        const _val = params.value;
+        embed(`${_key.split(".").slice(1).join(" ")} ${_val}`).then((vec) => {
+          if (vec) store.setEmbedding(_key, vec);
+        }).catch(() => {
+        });
         return ok(`Remembered: ${params.key} = ${params.value}`);
       }
       if (params.type === "lesson") {
@@ -1062,7 +1261,10 @@ function extractText(content) {
 }
 export {
   DEFAULT_CONSOLIDATION_MODEL,
+  MemoryStore,
+  buildContextBlock,
   index_default as default,
+  projectSlug,
   readSettingsConfig,
   resolveDbPath
 };

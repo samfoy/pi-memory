@@ -24,6 +24,14 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { MemoryStore } from "./store.js";
 import { buildContextBlock, projectSlug, type InjectorConfig } from "./injector.js";
+import { embed } from "./embedder.js";
+
+// Re-export internals so consumers (e.g. pi-dashboard's system-prompt route)
+// can build their own context blocks without reaching into ./dist/store.js.
+// The bundled `dist/index.js` inlines these, so prior `req('./dist/store.js')`
+// callers were always broken.
+export { MemoryStore } from "./store.js";
+export { buildContextBlock, projectSlug, type InjectorConfig } from "./injector.js";
 
 type ToolResult = AgentToolResult<unknown>;
 function ok(text: string): ToolResult { return { content: [{ type: "text", text }], details: {} }; }
@@ -249,11 +257,8 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Inject stored memory as a one-shot custom message BEFORE any user
-      // message arrives. Matches pi-knowledge-search's pattern.
-      //
-      // Skipped when `perTurnInjection: true` — in that mode the
-      // before_agent_start handler below takes over with per-turn semantic
-      // matching via systemPrompt mutation.
+      // message arrives. Only used when `perTurnInjection: false` is explicitly
+      // configured (session_start mode, opt-out from adaptive injection).
       //
       // Historical note: v1.0.x mutated event.systemPrompt in before_agent_start.
       // That broke provider prefix caches on every turn boundary (any drift in
@@ -267,9 +272,17 @@ export default function (pi: ExtensionAPI) {
       // lessons, 8KB cap). Correct ordering, stable cache, simpler model.
       //
       // v1.3.x adds `perTurnInjection: true` as an opt-in to restore v1.0.x
-      // per-turn selective behavior (mutates systemPrompt, breaks cache on
-      // every turn boundary — users opt in knowing the tradeoff).
-      if (!injectorConfig.perTurnInjection) {
+      // per-turn selective behavior.
+      //
+      // v1.4.0 flips the default: per-turn semantic injection via systemPrompt
+      // mutation in before_agent_start.
+      //
+      // v1.5.0 introduces injectionMode: "context-hook" as the new default.
+      // Memory is injected as an ephemeral message via the context hook instead
+      // of mutating systemPrompt. System prompt is now permanently stable,
+      // guaranteeing cache hits on the system prompt prefix regardless of topic.
+      // The session_start fallback dump is opt-in via `perTurnInjection: false`.
+      if (injectorConfig.perTurnInjection === false) {
         try {
           const alreadyInjected = ctx.sessionManager
             .getEntries()
@@ -278,7 +291,7 @@ export default function (pi: ExtensionAPI) {
                 e.type === "custom_message" && e.customType === "pi-memory-context",
             );
           if (!alreadyInjected) {
-            const { text, stats: injStats } = buildContextBlock(
+            const { text, stats: injStats } = await buildContextBlock(
               store,
               sessionCwd,
               undefined, // no prompt → fallback: dump all relevant memory
@@ -303,22 +316,26 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ----------------------------------------------------------------
-  // Opt-in per-turn selective injection (v1.3.0).
+  // Per-turn semantic injection (v1.4.0 default).
   //
-  // When `perTurnInjection: true` is set, run a semantic search against the
-  // current user prompt and append matching memory to event.systemPrompt.
+  // Runs on every user turn, injecting memories relevant to the current
+  // prompt into event.systemPrompt. This is now the DEFAULT behavior;
+  // session_start fallback mode requires `perTurnInjection: false`.
+  //
+  // Cache stability: when the same entries are relevant across consecutive
+  // turns (stable topic), the injected text is identical and the provider's
+  // prefix cache hits. Entries are sorted deterministically in the injector
+  // so identical sets always produce identical text.
+  //
   // MUST use systemPrompt (not { message }) — returning { message } puts the
   // content AFTER the user message and causes the model to respond to the
   // injected memory instead of the user. See v1.1.x postmortem.
-  //
-  // This breaks provider prefix caches on every turn boundary — an accepted
-  // cost for users who want per-query relevance from large memory stores.
   // ----------------------------------------------------------------
   pi.on("before_agent_start", async (event, ctx) => {
     if (!store) return;
-    if (!injectorConfig.perTurnInjection) return;
+    if (injectorConfig.perTurnInjection === false) return;
 
-    const { text } = buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
+    const { text } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
     if (!text) return;
 
     return {
@@ -515,6 +532,13 @@ export default function (pi: ExtensionAPI) {
           return ok("Both key and value required for facts");
         }
         store.setSemantic(params.key, params.value, 0.95, "user");
+        // Fire-and-forget: compute and store embedding for the new/updated entry
+        // so it's available for semantic search in future sessions.
+        const _key = params.key as string;
+        const _val = params.value as string;
+        embed(`${_key.split(".").slice(1).join(" ")} ${_val}`)
+          .then(vec => { if (vec) store!.setEmbedding(_key, vec); })
+          .catch(() => {});
         return ok(`Remembered: ${params.key} = ${params.value}`);
       }
 
