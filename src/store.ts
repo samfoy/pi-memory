@@ -1,13 +1,37 @@
 /**
- * SQLite-backed memory store using Node's built-in node:sqlite.
+ * SQLite-backed memory store.
  * Three tables:
  * - semantic: key-value facts (preferences, project patterns, corrections)
  * - lessons: learned corrections with dedup
  * - events: audit log of all memory operations
+ *
+ * Supports both Node ≥22 (node:sqlite / DatabaseSync) and Bun (bun:sqlite / Database).
+ * The two APIs have the same synchronous surface; only the import path differs.
  */
-import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+
+// node:module / createRequire is available in both Node and Bun.
+const _require = createRequire(import.meta.url);
+
+// Detect Bun at runtime — it exposes a global `Bun` object.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const isBun = typeof (globalThis as any).Bun !== "undefined";
+
+/**
+ * Synchronous SQLite database constructor.
+ * - Node ≥22 : `DatabaseSync` from `node:sqlite`
+ * - Bun      : `Database`     from `bun:sqlite`
+ *
+ * Both expose the same synchronous `prepare / exec / close` surface used below.
+ * The only difference in practice: `.get()` returns `null` (Bun) vs `undefined`
+ * (Node) for no-row queries — both are falsy, so all callers are unaffected.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const DatabaseSync: new (path: string) => any = isBun
+  ? _require("bun:sqlite").Database
+  : _require("node:sqlite").DatabaseSync;
 
 // ─── Types ───────────────────────────────────────────────────────────
 
