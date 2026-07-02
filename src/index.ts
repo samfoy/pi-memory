@@ -363,10 +363,12 @@ export default function (pi: ExtensionAPI) {
   });
 
   // context-hook injection. Fires on every LLM call within a turn; splices the
-  // cached memory block as an ephemeral user message immediately before the
-  // latest user message. Only acts when the last message is the user turn, so
-  // tool-call continuations don't duplicate the block. The injected message is
-  // not written to agent.state.messages, session history, or consolidation.
+  // cached memory block as an ephemeral user message immediately BEFORE the
+  // latest user message — on every call, including tool-call continuations.
+  // Keeping the block at a stable position (just before the user turn) means
+  // the persisted history never contains it, so the prefix caches and each
+  // continuation grows append-only. The injected message is not written to
+  // agent.state.messages, session history, or the consolidation queue.
   pi.on("context", async (event, _ctx) => {
     if (!store) return;
     if (injectorConfig.perTurnInjection === false) return;
@@ -375,15 +377,22 @@ export default function (pi: ExtensionAPI) {
 
     const msgs = event.messages;
     if (!msgs || msgs.length === 0) return;
-    const last = msgs[msgs.length - 1] as any;
-    if (!last || last.role !== "user") return;
+
+    // Insert before the latest user message (not merely the last message):
+    // on continuations the last message is a tool result, but the user turn
+    // is still where the memory belongs.
+    let idx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if ((msgs[i] as any).role === "user") { idx = i; break; }
+    }
+    if (idx === -1) return;
 
     const recallMessage = {
       role: "user",
       content: pendingContextBlock,
       timestamp: Date.now(),
     } as any;
-    return { messages: [...msgs.slice(0, -1), recallMessage, last] };
+    return { messages: [...msgs.slice(0, idx), recallMessage, ...msgs.slice(idx)] };
   });
 
 

@@ -1018,14 +1018,20 @@ ${text}` };
     if (!pendingContextBlock) return;
     const msgs = event.messages;
     if (!msgs || msgs.length === 0) return;
-    const last = msgs[msgs.length - 1];
-    if (!last || last.role !== "user") return;
+    let idx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) return;
     const recallMessage = {
       role: "user",
       content: pendingContextBlock,
       timestamp: Date.now()
     };
-    return { messages: [...msgs.slice(0, -1), recallMessage, last] };
+    return { messages: [...msgs.slice(0, idx), recallMessage, ...msgs.slice(idx)] };
   });
   pi.on("agent_end", async (event, _ctx) => {
     for (const msg of event.messages) {
