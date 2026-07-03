@@ -102,7 +102,7 @@ function warnUnknownKeys(block: unknown, blockName: string, knownKeys: readonly 
   );
 }
 
-const PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection"] as const;
+const PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection", "injectionMode"] as const;
 const PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"] as const;
 
 export function resolveDbPath(cwd: string): string {
@@ -149,6 +149,9 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
   }
   if (typeof m.perTurnInjection === "boolean") {
     config.perTurnInjection = m.perTurnInjection;
+  }
+  if (m.injectionMode === "system-prompt" || m.injectionMode === "context-hook") {
+    config.injectionMode = m.injectionMode;
   }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
     config.consolidationModel = m.consolidationModel.trim();
@@ -207,6 +210,11 @@ export default function (pi: ExtensionAPI) {
   let cachedCtx: any = null;
   let resolvedDbPath: string = DEFAULT_DB_PATH;
   let injectorConfig: InjectorConfig = readSettingsConfig();
+
+  // Per-turn memory block computed by before_agent_start and spliced into the
+  // LLM request by the "context" hook (context-hook injection mode). Ephemeral:
+  // never persisted to session history or the consolidation queue.
+  let pendingContextBlock: string | null = null;
 
   // ─── Lifecycle ───────────────────────────────────────────────────
 
@@ -316,31 +324,75 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ----------------------------------------------------------------
-  // Per-turn semantic injection (v1.4.0 default).
+  // Per-turn semantic injection (default). Runs on every user turn, searching
+  // memory relevant to the current prompt. Two injection strategies, selected
+  // by `injectionMode`:
   //
-  // Runs on every user turn, injecting memories relevant to the current
-  // prompt into event.systemPrompt. This is now the DEFAULT behavior;
-  // session_start fallback mode requires `perTurnInjection: false`.
+  //   "context-hook" (default) — stash the block here; the pi.on("context")
+  //     handler below splices it as an ephemeral message just before the
+  //     latest user message. The system prompt is NEVER modified, so its
+  //     prefix caches unconditionally; a memory change only misses the cache
+  //     from the injection point forward, not from the system-prompt root.
   //
-  // Cache stability: when the same entries are relevant across consecutive
-  // turns (stable topic), the injected text is identical and the provider's
-  // prefix cache hits. Entries are sorted deterministically in the injector
-  // so identical sets always produce identical text.
+  //   "system-prompt" (legacy v1.4.0) — append the block to event.systemPrompt.
+  //     Cache-stable only while the retrieved memory is unchanged; any change
+  //     (e.g. a topic shift retrieving different entries) invalidates the
+  //     prefix at the system-prompt root and rewrites the entire suffix at
+  //     cacheWrite rates.
   //
-  // MUST use systemPrompt (not { message }) — returning { message } puts the
-  // content AFTER the user message and causes the model to respond to the
-  // injected memory instead of the user. See v1.1.x postmortem.
+  // Correctness holds either way: systemPrompt is a separate field from the
+  // messages list, and the ephemeral recall message is inserted BEFORE the
+  // user's message, so the user's question remains the final user-role turn.
   // ----------------------------------------------------------------
   pi.on("before_agent_start", async (event, ctx) => {
     if (!store) return;
     if (injectorConfig.perTurnInjection === false) return;
 
     const { text } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
-    if (!text) return;
+    const mode = injectorConfig.injectionMode ?? "context-hook";
 
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${text}`,
-    };
+    if (mode === "system-prompt") {
+      pendingContextBlock = null;
+      if (!text) return;
+      return { systemPrompt: `${event.systemPrompt}\n\n${text}` };
+    }
+
+    // context-hook: never touch the system prompt; hand off to the context hook.
+    pendingContextBlock = text || null;
+    return;
+  });
+
+  // context-hook injection. Fires on every LLM call within a turn; splices the
+  // cached memory block as an ephemeral user message immediately BEFORE the
+  // latest user message — on every call, including tool-call continuations.
+  // Keeping the block at a stable position (just before the user turn) means
+  // the persisted history never contains it, so the prefix caches and each
+  // continuation grows append-only. The injected message is not written to
+  // agent.state.messages, session history, or the consolidation queue.
+  pi.on("context", async (event, _ctx) => {
+    if (!store) return;
+    if (injectorConfig.perTurnInjection === false) return;
+    if ((injectorConfig.injectionMode ?? "context-hook") !== "context-hook") return;
+    if (!pendingContextBlock) return;
+
+    const msgs = event.messages;
+    if (!msgs || msgs.length === 0) return;
+
+    // Insert before the latest user message (not merely the last message):
+    // on continuations the last message is a tool result, but the user turn
+    // is still where the memory belongs.
+    let idx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if ((msgs[i] as any).role === "user") { idx = i; break; }
+    }
+    if (idx === -1) return;
+
+    const recallMessage = {
+      role: "user",
+      content: pendingContextBlock,
+      timestamp: Date.now(),
+    } as any;
+    return { messages: [...msgs.slice(0, idx), recallMessage, ...msgs.slice(idx)] };
   });
 
 

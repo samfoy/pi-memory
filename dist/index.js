@@ -5,9 +5,12 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 
 // src/store.ts
-import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+var _require = createRequire(import.meta.url);
+var isBun = typeof globalThis.Bun !== "undefined";
+var DatabaseSync = isBun ? _require("bun:sqlite").Database : _require("node:sqlite").DatabaseSync;
 var MemoryStore = class {
   db;
   writeLock = Promise.resolve();
@@ -181,7 +184,8 @@ var MemoryStore = class {
         ORDER BY bm25(semantic_fts)
         LIMIT ?
       `).all(ftsQuery, limit);
-      return rows;
+      if (rows.length > 0) return rows;
+      return this._searchSemanticFallback(query, limit);
     } catch {
       return this._searchSemanticFallback(query, limit);
     }
@@ -277,7 +281,9 @@ var MemoryStore = class {
         ORDER BY bm25(lessons_fts)
         LIMIT ?
       `).all(ftsQuery, limit);
-      return rows.map((r) => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
+      const mapped = rows.map((r) => ({ ...r, negative: !!r.negative, project: r.project ?? null }));
+      if (mapped.length > 0) return mapped;
+      return this._searchLessonsFallback(query, limit);
     } catch {
       return this._searchLessonsFallback(query, limit);
     }
@@ -860,7 +866,7 @@ function warnUnknownKeys(block, blockName, knownKeys) {
     `pi-memory: ignoring unknown key(s) in settings.json "${blockName}" block: ${unknown.join(", ")} (expected: ${knownKeys.join(", ")})`
   );
 }
-var PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection"];
+var PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection", "injectionMode"];
 var PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"];
 function resolveDbPath(cwd) {
   try {
@@ -889,6 +895,9 @@ function mergeMemorySettings(config, memorySettings) {
   }
   if (typeof m.perTurnInjection === "boolean") {
     config.perTurnInjection = m.perTurnInjection;
+  }
+  if (m.injectionMode === "system-prompt" || m.injectionMode === "context-hook") {
+    config.injectionMode = m.injectionMode;
   }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
     config.consolidationModel = m.consolidationModel.trim();
@@ -921,6 +930,7 @@ function index_default(pi) {
   let cachedCtx = null;
   let resolvedDbPath = DEFAULT_DB_PATH;
   let injectorConfig = readSettingsConfig();
+  let pendingContextBlock = null;
   pi.on("session_start", async (_event, ctx) => {
     try {
       sessionCwd = ctx.cwd;
@@ -990,12 +1000,38 @@ function index_default(pi) {
     if (!store) return;
     if (injectorConfig.perTurnInjection === false) return;
     const { text } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
-    if (!text) return;
-    return {
-      systemPrompt: `${event.systemPrompt}
+    const mode = injectorConfig.injectionMode ?? "context-hook";
+    if (mode === "system-prompt") {
+      pendingContextBlock = null;
+      if (!text) return;
+      return { systemPrompt: `${event.systemPrompt}
 
-${text}`
+${text}` };
+    }
+    pendingContextBlock = text || null;
+    return;
+  });
+  pi.on("context", async (event, _ctx) => {
+    if (!store) return;
+    if (injectorConfig.perTurnInjection === false) return;
+    if ((injectorConfig.injectionMode ?? "context-hook") !== "context-hook") return;
+    if (!pendingContextBlock) return;
+    const msgs = event.messages;
+    if (!msgs || msgs.length === 0) return;
+    let idx = -1;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) return;
+    const recallMessage = {
+      role: "user",
+      content: pendingContextBlock,
+      timestamp: Date.now()
     };
+    return { messages: [...msgs.slice(0, idx), recallMessage, ...msgs.slice(idx)] };
   });
   pi.on("agent_end", async (event, _ctx) => {
     for (const msg of event.messages) {
