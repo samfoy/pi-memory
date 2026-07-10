@@ -1069,17 +1069,26 @@ ${text}` };
   });
   pi.on("session_shutdown", async () => {
     if (!store) return;
-    if (cachedCtx) {
-      cachedCtx.ui.setStatus("pi-memory", "\u{1F9E0} Consolidating memory...");
-    }
-    if (pendingUserMessages.length >= 3) {
-      try {
-        await consolidateSession();
-      } catch {
+    try {
+      if (cachedCtx && pendingUserMessages.length >= 3) {
+        cachedCtx.ui.setStatus("pi-memory", "\u{1F9E0} Consolidating memory...");
       }
+      if (pendingUserMessages.length >= 3) {
+        try {
+          await consolidateSession();
+        } catch {
+        }
+      }
+    } finally {
+      if (cachedCtx) {
+        try {
+          cachedCtx.ui.setStatus("pi-memory", "");
+        } catch {
+        }
+      }
+      store.close();
+      store = null;
     }
-    store.close();
-    store = null;
   });
   async function consolidateSession() {
     if (!store) return;
@@ -1141,7 +1150,8 @@ ${text}` };
     }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
-      const results = store.searchSemantic(params.query, params.limit ?? 10);
+      const searchParams = params;
+      const results = store.searchSemantic(searchParams.query, searchParams.limit ?? 10);
       if (results.length === 0) {
         return ok("No matching memories found.");
       }
@@ -1165,39 +1175,40 @@ ${text}` };
     }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
-      params = {
-        ...params,
-        type: stripQuotes(params.type),
-        key: stripQuotes(params.key),
-        value: stripQuotes(params.value),
-        rule: stripQuotes(params.rule),
-        category: stripQuotes(params.category)
+      const input = params;
+      const rememberParams = {
+        ...input,
+        type: stripQuotes(input.type),
+        key: stripQuotes(input.key),
+        value: stripQuotes(input.value),
+        rule: stripQuotes(input.rule),
+        category: stripQuotes(input.category)
       };
-      if (params.type !== "fact" && params.type !== "lesson") {
-        return ok(`Invalid type: ${params.type}. Must be 'fact' or 'lesson'.`);
+      if (rememberParams.type !== "fact" && rememberParams.type !== "lesson") {
+        return ok(`Invalid type: ${rememberParams.type}. Must be 'fact' or 'lesson'.`);
       }
-      if (params.type === "fact") {
-        if (!params.key || !params.value) {
+      if (rememberParams.type === "fact") {
+        if (!rememberParams.key || !rememberParams.value) {
           return ok("Both key and value required for facts");
         }
-        store.setSemantic(params.key, params.value, 0.95, "user");
-        const _key = params.key;
-        const _val = params.value;
+        store.setSemantic(rememberParams.key, rememberParams.value, 0.95, "user");
+        const _key = rememberParams.key;
+        const _val = rememberParams.value;
         embed(`${_key.split(".").slice(1).join(" ")} ${_val}`).then((vec) => {
           if (vec) store.setEmbedding(_key, vec);
         }).catch(() => {
         });
-        return ok(`Remembered: ${params.key} = ${params.value}`);
+        return ok(`Remembered: ${rememberParams.key} = ${rememberParams.value}`);
       }
-      if (params.type === "lesson") {
-        if (!params.rule) {
+      if (rememberParams.type === "lesson") {
+        if (!rememberParams.rule) {
           return ok("Rule text required for lessons");
         }
-        const result = store.addLesson(params.rule, params.category ?? "general", "user", params.negative ?? false);
+        const result = store.addLesson(rememberParams.rule, rememberParams.category ?? "general", "user", rememberParams.negative ?? false);
         if (result.success) {
-          return ok(`Lesson learned: ${params.rule}`);
+          return ok(`Lesson learned: ${rememberParams.rule}`);
         }
-        return ok(`Already known (${result.reason}): ${params.rule}`);
+        return ok(`Already known (${result.reason}): ${rememberParams.rule}`);
       }
       return ok("Unknown type");
     }
@@ -1213,22 +1224,23 @@ ${text}` };
     }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
-      params = {
-        ...params,
-        type: stripQuotes(params.type),
-        key: stripQuotes(params.key),
-        id: stripQuotes(params.id)
+      const input = params;
+      const forgetParams = {
+        ...input,
+        type: stripQuotes(input.type),
+        key: stripQuotes(input.key),
+        id: stripQuotes(input.id)
       };
-      if (params.type !== "fact" && params.type !== "lesson") {
-        return ok(`Invalid type: ${params.type}. Must be 'fact' or 'lesson'.`);
+      if (forgetParams.type !== "fact" && forgetParams.type !== "lesson") {
+        return ok(`Invalid type: ${forgetParams.type}. Must be 'fact' or 'lesson'.`);
       }
-      if (params.type === "fact" && params.key) {
-        const deleted = store.deleteSemantic(params.key);
-        return ok(deleted ? `Forgot: ${params.key}` : `Not found: ${params.key}`);
+      if (forgetParams.type === "fact" && forgetParams.key) {
+        const deleted = store.deleteSemantic(forgetParams.key);
+        return ok(deleted ? `Forgot: ${forgetParams.key}` : `Not found: ${forgetParams.key}`);
       }
-      if (params.type === "lesson" && params.id) {
-        const deleted = store.deleteLesson(params.id);
-        return ok(deleted ? `Forgot lesson ${params.id}` : `Not found: ${params.id}`);
+      if (forgetParams.type === "lesson" && forgetParams.id) {
+        const deleted = store.deleteLesson(forgetParams.id);
+        return ok(deleted ? `Forgot lesson ${forgetParams.id}` : `Not found: ${forgetParams.id}`);
       }
       return ok("Provide key (for facts) or id (for lessons)");
     }
@@ -1243,7 +1255,8 @@ ${text}` };
     }),
     async execute(_id, params, _signal, _update, _ctx) {
       if (!store) return ok("Memory store not initialized");
-      const lessons = store.listLessons(params.category, params.limit ?? 50);
+      const lessonsParams = params;
+      const lessons = store.listLessons(lessonsParams.category, lessonsParams.limit ?? 50);
       if (lessons.length === 0) {
         return ok("No lessons learned yet.");
       }

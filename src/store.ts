@@ -68,7 +68,7 @@ export interface MemoryEvent {
 // ─── Store ───────────────────────────────────────────────────────────
 
 export class MemoryStore {
-  private db: DatabaseSync;
+  private db: InstanceType<typeof DatabaseSync>;
   private writeLock: Promise<void> = Promise.resolve();
   private hasFTS5: boolean = false;
 
