@@ -342,73 +342,6 @@ function jaccard(a, b) {
   return intersection.size / union.size;
 }
 
-// src/embedder.ts
-var MODEL = "Xenova/all-MiniLM-L6-v2";
-var LOAD_TIMEOUT_MS = 3e4;
-var INFER_TIMEOUT_MS = 5e3;
-var TEXT_CHAR_LIMIT = 512;
-var _pipe = null;
-var _failed = false;
-async function getPipe() {
-  if (_failed) return null;
-  if (_pipe) return _pipe;
-  try {
-    const pkg = "@xenova/transformers";
-    const mod = await import(pkg).catch(() => null);
-    if (!mod) {
-      console.error("pi-memory: @xenova/transformers not installed, semantic search disabled");
-      _failed = true;
-      return null;
-    }
-    const { pipeline, env } = mod;
-    env.allowRemoteModels = true;
-    env.useBrowserCache = false;
-    _pipe = await withTimeout(
-      pipeline("feature-extraction", MODEL, { quantized: true }),
-      LOAD_TIMEOUT_MS,
-      "model load"
-    );
-    return _pipe;
-  } catch (err) {
-    console.error(`pi-memory: embedder unavailable (${err?.message ?? err}), using FTS-only`);
-    _failed = true;
-    return null;
-  }
-}
-async function embed(text) {
-  const pipe = await getPipe();
-  if (!pipe) return null;
-  try {
-    const out = await withTimeout(
-      pipe(text.slice(0, TEXT_CHAR_LIMIT), { pooling: "mean", normalize: true }),
-      INFER_TIMEOUT_MS,
-      "inference"
-    );
-    return new Float32Array(out.data);
-  } catch {
-    return null;
-  }
-}
-function similarity(a, b) {
-  let dot = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) dot += a[i] * b[i];
-  return dot;
-}
-function fromBlob(b) {
-  if (!b) return null;
-  const raw = Uint8Array.from(b);
-  return new Float32Array(raw.buffer);
-}
-function withTimeout(p, ms, label) {
-  return Promise.race([
-    p,
-    new Promise(
-      (_, reject) => setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
-    )
-  ]);
-}
-
 // src/injector.ts
 import os from "node:os";
 var MAX_CONTEXT_CHARS = 8e3;
@@ -443,61 +376,17 @@ async function buildSelectiveBlock(store, prompt, cwd, config) {
     return parts.length >= 2 && parts[1] === slug;
   }) : results;
   const seen = new Set(filteredResults.map((r) => r.key));
-  const SEMANTIC_THRESHOLD = 0.25;
-  const SEMANTIC_LIMIT = 8;
-  const allEmbs = store.getAllEmbeddings();
-  const promptVec = await embed(prompt);
-  const semanticKeys = /* @__PURE__ */ new Set();
-  if (promptVec) {
-    const semanticHits = allEmbs.flatMap(({ key, embedding }) => {
-      const vec = fromBlob(embedding);
-      if (!vec) return [];
-      const score = similarity(promptVec, vec);
-      return score >= SEMANTIC_THRESHOLD ? [{ key, score }] : [];
-    }).sort((a, b) => b.score - a.score).slice(0, SEMANTIC_LIMIT);
-    for (const { key } of semanticHits) {
-      semanticKeys.add(key);
-      if (!seen.has(key)) {
-        const entry = store.getSemantic(key);
-        if (entry) {
-          filteredResults.push(entry);
-          seen.add(key);
-        }
-      }
-    }
-    backfillEmbeddings(store, allEmbs.filter((r) => !r.embedding)).catch(() => {
-    });
-  }
   const expandedPrefixes = /* @__PURE__ */ new Set();
   for (const r of [...filteredResults]) {
     const prefix = keyDomainPrefix(r.key);
     if (!prefix || expandedPrefixes.has(prefix)) continue;
     expandedPrefixes.add(prefix);
-    const limit = semanticKeys.has(r.key) ? 20 : 5;
-    for (const sibling of store.listSemantic(prefix, limit)) {
+    for (const sibling of store.listSemantic(prefix, 5)) {
       if (!seen.has(sibling.key)) {
         filteredResults.push(sibling);
         seen.add(sibling.key);
       }
     }
-  }
-  if (semanticKeys.size > 0) {
-    const semanticPrefixes = /* @__PURE__ */ new Set();
-    for (const k of semanticKeys) {
-      const p = keyDomainPrefix(k);
-      if (p) semanticPrefixes.add(p);
-    }
-    const isSemanticRelated = (key) => {
-      if (semanticKeys.has(key)) return true;
-      const p = keyDomainPrefix(key);
-      return p ? semanticPrefixes.has(p) : false;
-    };
-    const priority = filteredResults.filter((r) => isSemanticRelated(r.key));
-    const rest = filteredResults.filter((r) => !isSemanticRelated(r.key));
-    priority.sort((a, b) => a.key.localeCompare(b.key));
-    rest.sort((a, b) => a.key.localeCompare(b.key));
-    filteredResults.length = 0;
-    filteredResults.push(...priority, ...rest);
   }
   if (filteredResults.length > 0) {
     sections.push(formatSection("Relevant Memory", filteredResults.map(formatSemantic)));
@@ -642,16 +531,6 @@ var MEMORY_DRIFT_CAVEAT = `## Before acting on memory
 function keyDomainPrefix(key) {
   const parts = key.split(".");
   return parts.length >= 3 ? parts.slice(0, 2).join(".") : null;
-}
-async function backfillEmbeddings(store, missing) {
-  if (missing.length === 0) return;
-  for (const { key } of missing.slice(0, 10)) {
-    const entry = store.getSemantic(key);
-    if (!entry) continue;
-    const displayKey = key.split(".").slice(1).join(" ");
-    const vec = await embed(`${displayKey} ${entry.value}`);
-    if (vec) store.setEmbedding(key, vec);
-  }
 }
 function projectSlug(cwd) {
   const parts = cwd.split("/").filter(Boolean);
@@ -1192,12 +1071,6 @@ ${text}` };
           return ok("Both key and value required for facts");
         }
         store.setSemantic(rememberParams.key, rememberParams.value, 0.95, "user");
-        const _key = rememberParams.key;
-        const _val = rememberParams.value;
-        embed(`${_key.split(".").slice(1).join(" ")} ${_val}`).then((vec) => {
-          if (vec) store.setEmbedding(_key, vec);
-        }).catch(() => {
-        });
         return ok(`Remembered: ${rememberParams.key} = ${rememberParams.value}`);
       }
       if (rememberParams.type === "lesson") {
