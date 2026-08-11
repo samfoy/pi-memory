@@ -38,6 +38,11 @@
     "@earendil-works/pi-coding-agent": "*",
     "@sinclair/typebox": "*"
   },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.83.0",
     "@sinclair/typebox": "^0.34.48",
