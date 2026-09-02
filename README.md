@@ -102,7 +102,8 @@ Set `perTurnInjection: true` to restore v1.0.x per-turn behavior:
 When enabled:
 
 - The session_start fallback dump is skipped.
-- Each user turn runs a semantic search against the current prompt, and the result is appended to the system prompt (not sent as a custom message — that would place it after the user's question in history).
+- Each user turn runs FTS relevance search against the current prompt. The default `context-hook` mode inserts the result as ephemeral context immediately before the latest user message; legacy `system-prompt` mode appends it to the system prompt.
+- Vector matching has been removed because its legacy Transformers backend pins vulnerable, outdated native/ONNX dependencies. Existing facts and lessons remain unchanged; old embedding BLOBs are ignored and may be re-created by a future maintained backend.
 - Pro: facts outside the 8KB fallback dump reach the model when they match the current prompt.
 - Con: the system prompt mutates per turn, invalidating the provider's prefix cache after the system block (Bedrock / Anthropic `cache_control`). The conversation suffix gets re-cached at `cacheWrite` rates on every user-turn boundary (~12.5x `cacheRead` on Claude).
 

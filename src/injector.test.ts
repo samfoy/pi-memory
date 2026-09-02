@@ -97,6 +97,18 @@ describe("buildContextBlock", () => {
     assert.ok(stats.semantic > 0);
   });
 
+  it("selective: preserves FTS relevance order", async () => {
+    store.setSemantic("pref.z_ordering_strong", "orderingprobe orderingprobe orderingprobe STRONG_MARKER", 0.9, "user");
+    store.setSemantic("pref.a_ordering_weak", "orderingprobe WEAK_MARKER", 0.9, "user");
+
+    const expected = store.searchSemantic("orderingprobe", 10).map(entry => entry.key);
+    assert.equal(expected.length, 2);
+
+    const { text } = await buildContextBlock(store, undefined, "orderingprobe");
+    const markerFor = (key: string) => key.includes("strong") ? "STRONG_MARKER" : "WEAK_MARKER";
+    assert.ok(text.indexOf(markerFor(expected[0])) < text.indexOf(markerFor(expected[1])));
+  });
+
   it("selective: always includes lessons regardless of prompt", async () => {
     const { text } = await buildContextBlock(store, undefined, "something totally unrelated xyz");
     assert.ok(text.includes("Learned Corrections"));

@@ -24,7 +24,6 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { MemoryStore } from "./store.js";
 import { buildContextBlock, projectSlug, type InjectorConfig } from "./injector.js";
-import { embed } from "./embedder.js";
 
 // Re-export internals so consumers (e.g. pi-dashboard's system-prompt route)
 // can build their own context blocks without reaching into ./dist/store.js.
@@ -602,13 +601,6 @@ export default function (pi: ExtensionAPI) {
           return ok("Both key and value required for facts");
         }
         store.setSemantic(rememberParams.key, rememberParams.value, 0.95, "user");
-        // Fire-and-forget: compute and store embedding for the new/updated entry
-        // so it's available for semantic search in future sessions.
-        const _key = rememberParams.key;
-        const _val = rememberParams.value;
-        embed(`${_key.split(".").slice(1).join(" ")} ${_val}`)
-          .then(vec => { if (vec) store!.setEmbedding(_key, vec); })
-          .catch(() => {});
         return ok(`Remembered: ${rememberParams.key} = ${rememberParams.value}`);
       }
 
