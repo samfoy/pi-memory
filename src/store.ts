@@ -11,6 +11,7 @@
 import { createRequire } from "node:module";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { cosine, fromBlob } from "./vector.js";
 
 // node:module / createRequire is available in both Node and Bun.
 const _require = createRequire(import.meta.url);
@@ -249,6 +250,86 @@ export class MemoryStore {
     return this.db
       .prepare("SELECT key, embedding FROM semantic ORDER BY updated_at DESC")
       .all() as unknown as Array<{ key: string; embedding: Buffer | null }>;
+  }
+
+  /**
+   * Rank stored entries by cosine similarity against a query vector.
+   *
+   * Entries without an embedding are skipped rather than scored 0, so a
+   * partially-embedded store -- the normal case, since embeddings are written
+   * lazily as facts arrive -- does not drag un-embedded entries below lexical
+   * results they would have won on merit.
+   *
+   * `minScore` drops weak matches. Cosine over a 512-dim text embedding is
+   * rarely under ~0.2 even for unrelated text, and letting that tail through
+   * gives RRF a set of noise entries to reward for being "found by two paths".
+   */
+  searchSemanticByVector(
+    queryVector: Float32Array,
+    limit: number = 10,
+    minScore: number = 0.25,
+  ): SemanticEntry[] {
+    const scored: Array<{ key: string; score: number }> = [];
+    for (const row of this.getAllEmbeddings()) {
+      const vec = fromBlob(row.embedding);
+      if (!vec) continue;
+      const score = cosine(queryVector, vec);
+      if (score >= minScore) scored.push({ key: row.key, score });
+    }
+    if (scored.length === 0) return [];
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, limit);
+
+    // Re-fetch full rows in one statement, then restore similarity order:
+    // SQL `IN (...)` does not preserve the order of its value list.
+    const placeholders = top.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(`SELECT * FROM semantic WHERE key IN (${placeholders})`)
+      .all(...top.map((t) => t.key)) as unknown as SemanticEntry[];
+    const byKey = new Map(rows.map((r) => [r.key, r]));
+    return top
+      .map((t) => byKey.get(t.key))
+      .filter((r): r is SemanticEntry => r !== undefined);
+  }
+
+  /** How much of the store is embedded. Surfaced by memory_stats. */
+  embeddingCoverage(): { embedded: number; total: number } {
+    const rows = this.getAllEmbeddings();
+    return {
+      embedded: rows.filter((r) => fromBlob(r.embedding) !== null).length,
+      total: rows.length,
+    };
+  }
+
+  /**
+   * Entries needing an embedding: absent, unreadable, or -- when `dimensions`
+   * is given -- the wrong width.
+   *
+   * The width check matters for stores written before #31: that backend used
+   * 384-dim MiniLM vectors, while a Bedrock Titan config produces 512. Since
+   * cosine() returns 0 for mismatched lengths, a stale-width vector is not
+   * merely useless, it is invisible -- and without this check it would never be
+   * replaced, because the column is non-null.
+   */
+  entriesNeedingEmbedding(
+    dimensions?: number,
+    limit: number = 500,
+  ): Array<{ key: string; value: string }> {
+    const stale: string[] = [];
+    for (const row of this.getAllEmbeddings()) {
+      const vec = fromBlob(row.embedding);
+      if (vec === null || (dimensions !== undefined && vec.length !== dimensions)) {
+        stale.push(row.key);
+        if (stale.length >= limit) break;
+      }
+    }
+    if (stale.length === 0) return [];
+
+    const placeholders = stale.map(() => "?").join(",");
+    return this.db
+      .prepare(`SELECT key, value FROM semantic WHERE key IN (${placeholders})`)
+      .all(...stale) as unknown as Array<{ key: string; value: string }>;
   }
 
   listSemantic(prefix?: string, limit: number = 100): SemanticEntry[] {

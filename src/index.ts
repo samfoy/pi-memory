@@ -18,12 +18,14 @@
  * - memory_stats: show memory statistics
  */
 import type { ExtensionAPI, AgentToolResult, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { Type, type TSchema } from "@sinclair/typebox";
+import { Type, type TSchema } from "typebox";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
-import { MemoryStore } from "./store.js";
+import { MemoryStore, type SemanticEntry } from "./store.js";
 import { buildContextBlock, projectSlug, type InjectorConfig } from "./injector.js";
+import { createEmbedder, type Embedder } from "./embedder.js";
+import { reciprocalRankFusion } from "./hybrid.js";
 
 // Re-export internals so consumers (e.g. pi-dashboard's system-prompt route)
 // can build their own context blocks without reaching into ./dist/store.js.
@@ -112,7 +114,7 @@ function warnUnknownKeys(block: unknown, blockName: string, knownKeys: readonly 
   );
 }
 
-const PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection", "injectionMode"] as const;
+const PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection", "injectionMode", "embedding"] as const;
 const PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"] as const;
 
 export function resolveDbPath(cwd: string): string {
@@ -166,6 +168,43 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
     config.consolidationModel = m.consolidationModel.trim();
   }
+  config.embedding = parseEmbeddingSettings(m.embedding) ?? config.embedding;
+}
+
+const EMBEDDER_TYPES = ["openai", "bedrock", "ollama", "mistral", "openai-compatible"] as const;
+const EMBEDDING_KNOWN_KEYS = [
+  "type", "apiKey", "model", "baseUrl", "sendDimensions", "profile", "region", "url", "dimensions",
+] as const;
+
+/**
+ * Validate an `embedding` settings block. Returns undefined -- leaving search
+ * on FTS5 -- rather than throwing, so a malformed block degrades instead of
+ * breaking session startup. An unusable `type` is the only hard requirement.
+ */
+function parseEmbeddingSettings(raw: unknown): InjectorConfig["embedding"] | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const e = raw as Record<string, unknown>;
+
+  warnUnknownKeys(e, "pi-memory.embedding", EMBEDDING_KNOWN_KEYS);
+
+  const type = typeof e.type === "string" ? e.type.trim() : "";
+  if (!(EMBEDDER_TYPES as readonly string[]).includes(type)) {
+    console.error(
+      `pi-memory: ignoring embedding block, "type" must be one of ${EMBEDDER_TYPES.join(", ")} (got ${JSON.stringify(e.type)})`,
+    );
+    return undefined;
+  }
+
+  const out: NonNullable<InjectorConfig["embedding"]> = { type: type as typeof EMBEDDER_TYPES[number] };
+  for (const k of ["apiKey", "model", "baseUrl", "profile", "region", "url"] as const) {
+    const v = e[k];
+    if (typeof v === "string" && v.trim()) out[k] = v.trim();
+  }
+  if (typeof e.dimensions === "number" && Number.isFinite(e.dimensions) && e.dimensions > 0) {
+    out.dimensions = e.dimensions;
+  }
+  if (typeof e.sendDimensions === "boolean") out.sendDimensions = e.sendDimensions;
+  return out;
 }
 
 /**
@@ -221,6 +260,120 @@ export default function (pi: ExtensionAPI) {
   let resolvedDbPath: string = DEFAULT_DB_PATH;
   let injectorConfig: InjectorConfig = readSettingsConfig();
 
+  // Embedder is built lazily on first use and cached per session. `false` means
+  // "tried and failed" so a broken provider is not retried on every query.
+  let embedder: Embedder | null | false = null;
+
+  function getEmbedder(): Embedder | null {
+    if (embedder !== null) return embedder || null;
+    const cfg = injectorConfig.embedding;
+    if (!cfg) {
+      embedder = false;
+      return null;
+    }
+    try {
+      embedder = createEmbedder(cfg);
+      return embedder;
+    } catch (err) {
+      console.error(
+        `pi-memory: embedding provider unavailable (${(err as Error)?.message ?? err}), using FTS5 only`,
+      );
+      embedder = false;
+      return null;
+    }
+  }
+
+  /**
+   * Embed one entry and persist the vector. Fire-and-forget: a failure leaves
+   * the entry lexically searchable, which is the pre-embedding behaviour.
+   *
+   * The key's leading namespace segment is dropped from the embedded text --
+   * "pref.editor" contributes "editor", not "pref" -- because the namespace is
+   * a storage convention and embedding it clusters unrelated facts that merely
+   * share a prefix.
+   */
+  function embedEntry(key: string, value: string): void {
+    const emb = getEmbedder();
+    if (!emb || !store) return;
+    const text = `${key.split(".").slice(1).join(" ")} ${value}`.trim();
+    emb.embed(text)
+      .then((vec) => {
+        if (vec && vec.length > 0 && store) store.setEmbedding(key.toLowerCase(), Float32Array.from(vec));
+      })
+      .catch(() => { /* lexical search still covers this entry */ });
+  }
+
+  /** Titan v2 default; keep in sync with DEFAULTS in ./embedder.ts. */
+  const DEFAULT_EMBED_DIMENSIONS = 512;
+
+  /**
+   * Embed entries that have no usable vector yet, in the background.
+   *
+   * Runs after session_start rather than at write time because the main writer
+   * is session-end consolidation, and a fire-and-forget promise started during
+   * shutdown is killed before it resolves. Deferring to the next session's
+   * start is the only place the work reliably completes.
+   *
+   * Batched and capped so a large store does not issue hundreds of provider
+   * calls at once; the remainder is picked up on subsequent starts.
+   */
+  async function backfillEmbeddings(max: number = 64, batch: number = 16): Promise<void> {
+    const emb = getEmbedder();
+    if (!emb || !store) return;
+
+    const dims = injectorConfig.embedding?.dimensions ?? DEFAULT_EMBED_DIMENSIONS;
+    const todo = store.entriesNeedingEmbedding(dims, max);
+    if (todo.length === 0) return;
+
+    for (let i = 0; i < todo.length; i += batch) {
+      const slice = todo.slice(i, i + batch);
+      const texts = slice.map((e) => `${e.key.split(".").slice(1).join(" ")} ${e.value}`.trim());
+      try {
+        const vectors = await emb.embedBatch(texts);
+        vectors.forEach((vec, j) => {
+          const entry = slice[j];
+          if (vec && vec.length > 0 && entry && store) {
+            store.setEmbedding(entry.key.toLowerCase(), Float32Array.from(vec));
+          }
+        });
+      } catch {
+        return; // provider is unhappy; try again next session
+      }
+    }
+  }
+
+  /**
+   * Search memory, fusing FTS5 lexical hits with cosine-ranked semantic hits.
+   *
+   * Over-fetches each path (2x limit) before fusing, because an entry ranked
+   * just outside the lexical top-N can still win overall once the semantic
+   * path agrees with it -- truncating to `limit` first would discard exactly
+   * the agreements RRF exists to reward.
+   */
+  async function searchMemory(query: string, limit: number): Promise<SemanticEntry[]> {
+    if (!store) return [];
+    const pool = Math.max(limit * 2, 20);
+    const lexical = store.searchSemantic(query, pool);
+
+    const emb = getEmbedder();
+    if (!emb) return lexical.slice(0, limit);
+
+    let semantic: SemanticEntry[] = [];
+    try {
+      const vec = await emb.embed(query);
+      if (vec && vec.length > 0) {
+        semantic = store.searchSemanticByVector(Float32Array.from(vec), pool);
+      }
+    } catch {
+      return lexical.slice(0, limit); // provider hiccup: lexical is still correct
+    }
+    if (semantic.length === 0) return lexical.slice(0, limit);
+
+    return reciprocalRankFusion(lexical, semantic, (e) => e.key)
+      .slice(0, limit)
+      .map((r) => r.item);
+  }
+
   // Per-turn memory block computed by before_agent_start and spliced into the
   // LLM request by the "context" hook (context-hook injection mode). Ephemeral:
   // never persisted to session history or the consolidation queue.
@@ -239,6 +392,11 @@ export default function (pi: ExtensionAPI) {
       injectorConfig = readSettingsConfig(sessionCwd);
 
       store = new MemoryStore(resolvedDbPath);
+
+      // Embedder is per-session; a new session may have different settings.
+      embedder = null;
+      // Deliberately not awaited: startup must not block on a provider call.
+      void backfillEmbeddings();
 
       // Seed pending messages from existing session history so that
       // /memory-consolidate works even when resuming a session (the
@@ -553,7 +711,7 @@ export default function (pi: ExtensionAPI) {
       if (!store) return ok("Memory store not initialized");
 
       const searchParams = params as MemorySearchParams;
-      const results = store.searchSemantic(searchParams.query, searchParams.limit ?? 10);
+      const results = await searchMemory(searchParams.query, searchParams.limit ?? 10);
       if (results.length === 0) {
         return ok("No matching memories found.");
       }
@@ -601,6 +759,7 @@ export default function (pi: ExtensionAPI) {
           return ok("Both key and value required for facts");
         }
         store.setSemantic(rememberParams.key, rememberParams.value, 0.95, "user");
+        embedEntry(rememberParams.key, rememberParams.value);
         return ok(`Remembered: ${rememberParams.key} = ${rememberParams.value}`);
       }
 
@@ -691,8 +850,20 @@ export default function (pi: ExtensionAPI) {
       if (!store) return ok("Memory store not initialized");
 
       const stats = store.stats();
-      const text = `Memory: ${stats.semantic} semantic facts, ${stats.lessons} active lessons, ${stats.events} events logged\nDB: ${resolvedDbPath}`;
-      return ok(text);
+      const lines = [
+        `Memory: ${stats.semantic} semantic facts, ${stats.lessons} active lessons, ${stats.events} events logged`,
+        `DB: ${resolvedDbPath}`,
+      ];
+      const cfg = injectorConfig.embedding;
+      if (cfg) {
+        const cov = store.embeddingCoverage();
+        lines.push(
+          `Search: hybrid (FTS5 + ${cfg.type}${cfg.model ? `/${cfg.model}` : ""}), ${cov.embedded}/${cov.total} embedded`,
+        );
+      } else {
+        lines.push("Search: FTS5 keyword only (set memory.embedding to enable semantic search)");
+      }
+      return ok(lines.join("\n"));
     },
   });
 

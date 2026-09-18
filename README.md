@@ -103,7 +103,7 @@ When enabled:
 
 - The session_start fallback dump is skipped.
 - Each user turn runs FTS relevance search against the current prompt. The default `context-hook` mode inserts the result as ephemeral context immediately before the latest user message; legacy `system-prompt` mode appends it to the system prompt.
-- Vector matching has been removed because its legacy Transformers backend pins vulnerable, outdated native/ONNX dependencies. Existing facts and lessons remain unchanged; old embedding BLOBs are ignored and may be re-created by a future maintained backend.
+- Vector matching is available again as of v1.6.0 on a maintained backend — see [Semantic search](#semantic-search). It stays off unless configured, so the default is still FTS5 keyword search with no extra dependencies.
 - Pro: facts outside the 8KB fallback dump reach the model when they match the current prompt.
 - Con: the system prompt mutates per turn, invalidating the provider's prefix cache after the system block (Bedrock / Anthropic `cache_control`). The conversation suffix gets re-cached at `cacheWrite` rates on every user-turn boundary (~12.5x `cacheRead` on Claude).
 
@@ -146,6 +146,55 @@ The result is capped at 15 most relevant lessons instead of all of them.
 ```
 
 Set this in `~/.pi/agent/settings.json` for a user-wide default, or in `{project}/.pi/settings.json` (either under `memory` or `pi-memory`) to override per project. Examples: `openai/gpt-4.1-mini`, `ollama/qwen3:8b`, `anthropic/claude-haiku-4-5-20251001`. If the model string is invalid the consolidation sub-process fails silently and the session's memory is simply not consolidated — no data is lost from previous sessions.
+
+## Semantic search
+
+Off by default. `memory_search` uses FTS5 BM25 keyword matching, which needs no
+configuration and no dependencies.
+
+Setting `embedding` turns on **hybrid** search: the keyword results and
+cosine-ranked vector results are combined with Reciprocal Rank Fusion, so an
+entry both paths agree on outranks one found by either alone. This is what makes
+"that auth thing" retrieve a fact worded "OIDC token refresh".
+
+```json
+{
+  "memory": {
+    "embedding": {
+      "type": "bedrock",
+      "model": "amazon.titan-embed-text-v2:0",
+      "region": "us-west-2",
+      "profile": "default",
+      "dimensions": 512
+    }
+  }
+}
+```
+
+Providers: `bedrock`, `openai`, `mistral`, `ollama`, `openai-compatible`.
+Bedrock is the default choice because it needs no API key beyond the AWS
+credential chain. The AWS SDK packages are `optionalDependencies` — absent, the
+Bedrock provider is simply unavailable and search stays lexical.
+
+Behaviour worth knowing:
+
+- **Fully optional and fail-soft.** An unconfigured, misconfigured, or failing
+  provider logs once and falls back to FTS5. Search never errors out.
+- **Embeddings are written lazily.** New facts are embedded as they are stored;
+  existing ones are backfilled in bounded batches shortly after `session_start`.
+  Backfill runs there rather than at write time because the main writer is
+  session-end consolidation, and a promise started during shutdown is killed
+  before it resolves.
+- **Stale-width vectors are replaced automatically.** Stores written before
+  v1.5.0 hold 384-dim MiniLM vectors; a 512-dim config makes those unmatchable,
+  since cosine similarity of different-length vectors is treated as 0. Backfill
+  detects the width mismatch and re-embeds, so you do not need to clear the
+  column.
+- `memory_stats` reports which mode is active and how much of the store is
+  embedded.
+
+To turn it off, remove the `embedding` block. Stored vectors are left alone and
+become inert.
 
 ## Storage
 

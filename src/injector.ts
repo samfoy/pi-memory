@@ -28,6 +28,24 @@ export type LessonInjectionMode = "all" | "selective";
 export interface InjectorConfig {
   lessonInjection?: LessonInjectionMode;
   /**
+   * Optional embedding provider for semantic search. Absent -- the default --
+   * means FTS5 BM25 only and needs no configuration.
+   *
+   * Shape mirrors EmbedderConfig in ./embedder.ts, typed structurally here so
+   * injector.ts does not need the embedder import.
+   */
+  embedding?: {
+    type: "openai" | "bedrock" | "ollama" | "mistral" | "openai-compatible";
+    apiKey?: string;
+    model?: string;
+    baseUrl?: string;
+    sendDimensions?: boolean;
+    profile?: string;
+    region?: string;
+    url?: string;
+    dimensions?: number;
+  };
+  /**
    * Opt-in: restore per-user-message selective injection.
    *
    * When false (default), pi-memory injects a one-shot fallback block at
