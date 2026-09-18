@@ -199,11 +199,22 @@ var MemoryStore = class {
    * lazily as facts arrive -- does not drag un-embedded entries below lexical
    * results they would have won on merit.
    *
-   * `minScore` drops weak matches. Cosine over a 512-dim text embedding is
-   * rarely under ~0.2 even for unrelated text, and letting that tail through
-   * gives RRF a set of noise entries to reward for being "found by two paths".
+   * `minScore` drops weak matches, so RRF is not handed noise to reward for
+   * being "found by two paths".
+   *
+   * The default is calibrated against amazon.titan-embed-text-v2:0 at 512
+   * dimensions, measured rather than assumed:
+   *
+   *   paraphrases of a stored fact   0.219 - 0.248
+   *   loosely related text           0.235
+   *   unrelated text                -0.025 - 0.082
+   *
+   * Titan's usable range is much narrower than raw cosine suggests, so 0.15
+   * sits mid-gap with roughly equal margin on both sides. A higher-contrast
+   * model may want a higher floor; pass `minScore` explicitly if you change
+   * providers.
    */
-  searchSemanticByVector(queryVector, limit = 10, minScore = 0.25) {
+  searchSemanticByVector(queryVector, limit = 10, minScore = 0.15) {
     const scored = [];
     for (const row of this.getAllEmbeddings()) {
       const vec = fromBlob(row.embedding);
