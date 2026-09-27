@@ -7,7 +7,9 @@
  * - Fallback (no prompt): dump top entries by prefix (old behavior).
  */
 import type { MemoryStore, SemanticEntry, LessonEntry } from "./store.js";
-import os from "node:os";
+import { projectSlug } from "./project.js";
+
+export { projectSlug } from "./project.js";
 
 const MAX_CONTEXT_CHARS = 8000;
 const SEARCH_LIMIT = 15;
@@ -369,13 +371,4 @@ const MEMORY_DRIFT_CAVEAT = `## Before acting on memory
 function keyDomainPrefix(key: string): string | null {
   const parts = key.split(".");
   return parts.length >= 3 ? parts.slice(0, 2).join(".") : null;
-}
-
-export function projectSlug(cwd: string): string {
-  const parts = cwd.split("/").filter(Boolean);
-  const skip = new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().username]);
-  for (const p of parts.reverse()) {
-    if (!skip.has(p.toLowerCase()) && p.length > 1) return p.toLowerCase();
-  }
-  return "";
 }

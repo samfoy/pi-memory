@@ -35,6 +35,17 @@ function fromBlob(b) {
   return new Float32Array(copy.buffer, copy.byteOffset, copy.byteLength / 4);
 }
 
+// src/project.ts
+import os from "node:os";
+function projectSlug(cwd) {
+  const parts = cwd.replace(/\\/g, "/").split("/").filter(Boolean);
+  const skip = /* @__PURE__ */ new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().username]);
+  for (const p of parts.reverse()) {
+    if (!skip.has(p.toLowerCase()) && p.length > 1) return p.toLowerCase();
+  }
+  return "";
+}
+
 // src/store.ts
 var _require = createRequire(import.meta.url);
 var isBun = typeof globalThis.Bun !== "undefined";
@@ -90,6 +101,7 @@ var MemoryStore = class {
       this.db.exec(`ALTER TABLE lessons ADD COLUMN project TEXT`);
     } catch {
     }
+    this.migrateLegacyLessonProjects();
     try {
       this.db.exec(`ALTER TABLE semantic ADD COLUMN embedding BLOB`);
     } catch {
@@ -129,6 +141,19 @@ var MemoryStore = class {
     } catch {
       this.hasFTS5 = false;
     }
+  }
+  migrateLegacyLessonProjects() {
+    this.withLock(() => {
+      const rows = this.db.prepare(
+        "SELECT DISTINCT project FROM lessons WHERE project IS NOT NULL"
+      ).all();
+      const update = this.db.prepare("UPDATE lessons SET project = ? WHERE project = ?");
+      for (const row of rows) {
+        if (!row.project.includes("/") && !row.project.includes("\\")) continue;
+        const slug = projectSlug(row.project);
+        if (slug && slug !== row.project) update.run(slug, row.project);
+      }
+    });
   }
   /**
    * Serialize async callers so concurrent read-modify-write cycles
@@ -441,7 +466,6 @@ function jaccard(a, b) {
 }
 
 // src/injector.ts
-import os from "node:os";
 var MAX_CONTEXT_CHARS = 8e3;
 var SEARCH_LIMIT = 15;
 var LESSON_SEARCH_LIMIT = 15;
@@ -629,14 +653,6 @@ var MEMORY_DRIFT_CAVEAT = `## Before acting on memory
 function keyDomainPrefix(key) {
   const parts = key.split(".");
   return parts.length >= 3 ? parts.slice(0, 2).join(".") : null;
-}
-function projectSlug(cwd) {
-  const parts = cwd.split("/").filter(Boolean);
-  const skip = /* @__PURE__ */ new Set(["workplace", "local", "home", "src", "scratch", os.userInfo().username]);
-  for (const p of parts.reverse()) {
-    if (!skip.has(p.toLowerCase()) && p.length > 1) return p.toLowerCase();
-  }
-  return "";
 }
 
 // src/embedder.ts

@@ -176,6 +176,21 @@ describe("MemoryStore", () => {
       assert.equal(lesson.project, "rise");
     });
 
+    it("migrates legacy path-valued projects when reopening the store", () => {
+      const legacyDb = join(tmpDir, "legacy-project.db");
+      const legacyProject = String.raw`C:\PY\WVM_DEV\worktrees\media-vision-settings`;
+      const initial = new MemoryStore(legacyDb);
+      initial.addLesson("Keep the media vision harness focused", "testing", "consolidation", false, legacyProject);
+      initial.close();
+
+      const reopened = new MemoryStore(legacyDb);
+      const migrated = reopened.listLessons(undefined, 50, "media-vision-settings");
+      reopened.close();
+
+      assert.equal(migrated.length, 1);
+      assert.equal(migrated[0].project, "media-vision-settings");
+    });
+
     it("listLessons with project filter excludes other-project lessons", () => {
       store.addLesson("Use fabricca for rise fixtures", "testing", "consolidation", false, "rise");
       store.addLesson("Use pytest fixtures for myapp", "testing", "consolidation", false, "myapp");
