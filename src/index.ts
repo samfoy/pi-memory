@@ -49,6 +49,7 @@ type MemoryRememberParams = {
   rule?: string;
   category?: string;
   negative?: boolean;
+  project?: string;
 };
 type MemoryForgetParams = { type: string; key?: string; id?: string };
 type MemoryLessonsParams = { category?: string; limit?: number };
@@ -129,7 +130,7 @@ function warnUnknownKeys(block: unknown, blockName: string, knownKeys: readonly 
   );
 }
 
-const PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection", "injectionMode", "embedding"] as const;
+const PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "consolidation", "perTurnInjection", "injectionMode", "embedding"] as const;
 const PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"] as const;
 
 export function resolveDbPath(cwd: string): string {
@@ -182,6 +183,9 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
   }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
     config.consolidationModel = m.consolidationModel.trim();
+  }
+  if (typeof m.consolidation === "boolean") {
+    config.consolidation = m.consolidation;
   }
   config.embedding = parseEmbeddingSettings(m.embedding) ?? config.embedding;
 }
@@ -639,7 +643,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_before_switch", async (_event, ctx) => {
     if (!store) return;
 
-    if (pendingUserMessages.length >= 3) {
+    if (pendingUserMessages.length >= 3 && injectorConfig.consolidation !== false) {
       ctx.ui.setStatus("pi-memory", "🧠 Consolidating memory...");
       try {
         await consolidateSession();
@@ -663,12 +667,12 @@ export default function (pi: ExtensionAPI) {
 
     try {
       // Immediate visual feedback — user sees this as soon as C-c C-c fires
-      if (cachedCtx && pendingUserMessages.length >= 3) {
+      if (cachedCtx && pendingUserMessages.length >= 3 && injectorConfig.consolidation !== false) {
         cachedCtx.ui.setStatus("pi-memory", "🧠 Consolidating memory...");
       }
 
-      // Consolidate if we have enough conversation
-      if (pendingUserMessages.length >= 3) {
+      // Consolidate if we have enough conversation and automatic consolidation is on
+      if (pendingUserMessages.length >= 3 && injectorConfig.consolidation !== false) {
         try {
           await consolidateSession();
         } catch {
@@ -779,7 +783,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_remember",
     label: "Memory Remember",
-    description: "Store a fact, preference, or lesson in persistent memory. Use dotted keys like pref.editor, project.rosie.lang, tool.sed.usage. For corrections, use type='lesson'.",
+    description: "Store a fact, preference, or lesson in persistent memory. Use dotted keys like pref.editor, project.rosie.lang, tool.sed.usage. For corrections, use type='lesson'. Set project for a lesson that only applies to one project (slug = current directory name, lowercased); omit it for a global lesson.",
     parameters: Type.Object({
       type: Type.String({ description: "'fact' for key-value, 'lesson' for a correction" }),
       key: Type.Optional(Type.String({ description: "Dotted key for facts (e.g. pref.commit_style)" })),
@@ -787,6 +791,7 @@ export default function (pi: ExtensionAPI) {
       rule: Type.Optional(Type.String({ description: "Rule text for lessons" })),
       category: Type.Optional(Type.String({ description: "Category for lessons (default: general)" })),
       negative: Type.Optional(Type.Boolean({ description: "True if this is something to AVOID" })),
+      project: Type.Optional(Type.String({ description: "Project slug for a project-scoped lesson; omit for global" })),
     }) as any,
     async execute(_id, params, _signal, _update, ctx) {
       if (!store) return ok("Memory store not initialized");
@@ -800,6 +805,7 @@ export default function (pi: ExtensionAPI) {
         value: stripQuotes(input.value),
         rule: stripQuotes(input.rule),
         category: stripQuotes(input.category),
+        project: stripQuotes(input.project),
       };
 
       if (rememberParams.type !== "fact" && rememberParams.type !== "lesson") {
@@ -819,7 +825,8 @@ export default function (pi: ExtensionAPI) {
         if (!rememberParams.rule) {
           return ok("Rule text required for lessons");
         }
-        const result = store.addLesson(rememberParams.rule, rememberParams.category ?? "general", "user", rememberParams.negative ?? false);
+        const project = rememberParams.project?.trim() || undefined;
+        const result = store.addLesson(rememberParams.rule, rememberParams.category ?? "general", "user", rememberParams.negative ?? false, project);
         if (result.success) {
           return ok(`Lesson learned: ${rememberParams.rule}`);
         }

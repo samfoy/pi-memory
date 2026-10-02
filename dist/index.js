@@ -525,16 +525,17 @@ ${MEMORY_DRIFT_CAVEAT}
 function getRelevantLessons(store, prompt, cwd) {
   const seen = /* @__PURE__ */ new Set();
   const result = [];
+  const slug = cwd ? projectSlug(cwd) : "";
+  const visible = (l) => !l.project || slug !== "" && l.project === slug;
   function add(lessons) {
     for (const l of lessons) {
-      if (!seen.has(l.id)) {
+      if (visible(l) && !seen.has(l.id)) {
         seen.add(l.id);
         result.push(l);
       }
     }
   }
   add(store.searchLessons(prompt, LESSON_SEARCH_LIMIT));
-  const slug = cwd ? projectSlug(cwd) : "";
   if (slug) {
     add(store.searchLessons(slug, 5));
   }
@@ -565,7 +566,7 @@ function buildFallbackBlock(store, cwd) {
     sections.push(formatSection("Tool Preferences", tools.map(formatSemantic)));
     semanticCount += tools.length;
   }
-  const lessons = store.listLessons(void 0, 50, slug || void 0);
+  const lessons = store.listLessons(void 0, 50, slug || void 0).filter((l) => !l.project || slug !== "" && l.project === slug);
   if (lessons.length > 0) {
     const corrections = lessons.filter((l) => l.negative);
     const positives = lessons.filter((l) => !l.negative);
@@ -1210,7 +1211,7 @@ function warnUnknownKeys(block, blockName, knownKeys) {
     `pi-memory: ignoring unknown key(s) in settings.json "${blockName}" block: ${unknown.join(", ")} (expected: ${knownKeys.join(", ")})`
   );
 }
-var PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "perTurnInjection", "injectionMode", "embedding"];
+var PI_MEMORY_KNOWN_KEYS = ["localPath", "lessonInjection", "consolidationModel", "consolidation", "perTurnInjection", "injectionMode", "embedding"];
 var PI_TOTAL_RECALL_KNOWN_KEYS = ["localPath"];
 function resolveDbPath(cwd) {
   try {
@@ -1245,6 +1246,9 @@ function mergeMemorySettings(config, memorySettings) {
   }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
     config.consolidationModel = m.consolidationModel.trim();
+  }
+  if (typeof m.consolidation === "boolean") {
+    config.consolidation = m.consolidation;
   }
   config.embedding = parseEmbeddingSettings(m.embedding) ?? config.embedding;
 }
@@ -1524,7 +1528,7 @@ ${text}` };
   });
   pi.on("session_before_switch", async (_event, ctx) => {
     if (!store) return;
-    if (pendingUserMessages.length >= 3) {
+    if (pendingUserMessages.length >= 3 && injectorConfig.consolidation !== false) {
       ctx.ui.setStatus("pi-memory", "\u{1F9E0} Consolidating memory...");
       try {
         await consolidateSession();
@@ -1542,10 +1546,10 @@ ${text}` };
   pi.on("session_shutdown", async () => {
     if (!store) return;
     try {
-      if (cachedCtx && pendingUserMessages.length >= 3) {
+      if (cachedCtx && pendingUserMessages.length >= 3 && injectorConfig.consolidation !== false) {
         cachedCtx.ui.setStatus("pi-memory", "\u{1F9E0} Consolidating memory...");
       }
-      if (pendingUserMessages.length >= 3) {
+      if (pendingUserMessages.length >= 3 && injectorConfig.consolidation !== false) {
         try {
           await consolidateSession();
         } catch {
@@ -1636,14 +1640,15 @@ ${text}` };
   pi.registerTool({
     name: "memory_remember",
     label: "Memory Remember",
-    description: "Store a fact, preference, or lesson in persistent memory. Use dotted keys like pref.editor, project.rosie.lang, tool.sed.usage. For corrections, use type='lesson'.",
+    description: "Store a fact, preference, or lesson in persistent memory. Use dotted keys like pref.editor, project.rosie.lang, tool.sed.usage. For corrections, use type='lesson'. Set project for a lesson that only applies to one project (slug = current directory name, lowercased); omit it for a global lesson.",
     parameters: Type.Object({
       type: Type.String({ description: "'fact' for key-value, 'lesson' for a correction" }),
       key: Type.Optional(Type.String({ description: "Dotted key for facts (e.g. pref.commit_style)" })),
       value: Type.Optional(Type.String({ description: "Value for facts" })),
       rule: Type.Optional(Type.String({ description: "Rule text for lessons" })),
       category: Type.Optional(Type.String({ description: "Category for lessons (default: general)" })),
-      negative: Type.Optional(Type.Boolean({ description: "True if this is something to AVOID" }))
+      negative: Type.Optional(Type.Boolean({ description: "True if this is something to AVOID" })),
+      project: Type.Optional(Type.String({ description: "Project slug for a project-scoped lesson; omit for global" }))
     }),
     async execute(_id, params, _signal, _update, ctx) {
       if (!store) return ok("Memory store not initialized");
@@ -1654,7 +1659,8 @@ ${text}` };
         key: stripQuotes(input.key),
         value: stripQuotes(input.value),
         rule: stripQuotes(input.rule),
-        category: stripQuotes(input.category)
+        category: stripQuotes(input.category),
+        project: stripQuotes(input.project)
       };
       if (rememberParams.type !== "fact" && rememberParams.type !== "lesson") {
         return ok(`Invalid type: ${rememberParams.type}. Must be 'fact' or 'lesson'.`);
@@ -1671,7 +1677,8 @@ ${text}` };
         if (!rememberParams.rule) {
           return ok("Rule text required for lessons");
         }
-        const result = store.addLesson(rememberParams.rule, rememberParams.category ?? "general", "user", rememberParams.negative ?? false);
+        const project = rememberParams.project?.trim() || void 0;
+        const result = store.addLesson(rememberParams.rule, rememberParams.category ?? "general", "user", rememberParams.negative ?? false, project);
         if (result.success) {
           return ok(`Lesson learned: ${rememberParams.rule}`);
         }

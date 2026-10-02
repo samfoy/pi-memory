@@ -131,12 +131,15 @@ The result is capped at 15 most relevant lessons instead of all of them.
 {
   "memory": {
     "lessonInjection": "selective",
-    "consolidationModel": "openai/gpt-4.1-mini"
+    "consolidationModel": "openai/gpt-4.1-mini",
+    "consolidation": true
   }
 }
 ```
 
 Set this in `~/.pi/agent/settings.json` for a user-wide default, or in `{project}/.pi/settings.json` (either under `memory` or `pi-memory`) to override per project. Examples: `openai/gpt-4.1-mini`, `ollama/qwen3:8b`, `anthropic/claude-haiku-4-5-20251001`. If the model string is invalid the consolidation sub-process fails silently and the session's memory is simply not consolidated — no data is lost from previous sessions.
+
+Set `"consolidation": false` to skip automatic session-end extraction entirely (for example on metered providers); `memory_remember` and the manual `/memory-consolidate` command keep working.
 
 ## Semantic search
 

@@ -28,6 +28,11 @@ export type LessonInjectionMode = "all" | "selective";
 export interface InjectorConfig {
   lessonInjection?: LessonInjectionMode;
   /**
+   * Set false to skip automatic session-end consolidation entirely. Manual
+   * `/memory-consolidate` still works. Default true.
+   */
+  consolidation?: boolean;
+  /**
    * Optional embedding provider for semantic search. Absent -- the default --
    * means FTS5 BM25 only and needs no configuration.
    *
@@ -213,10 +218,14 @@ async function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: str
 function getRelevantLessons(store: MemoryStore, prompt: string, cwd?: string): LessonEntry[] {
   const seen = new Set<string>();
   const result: LessonEntry[] = [];
+  const slug = cwd ? projectSlug(cwd) : "";
+  // A lesson is visible only when it is global or tagged with the current
+  // project. Without a cwd no project tag can be verified, so show global only.
+  const visible = (l: LessonEntry) => !l.project || (slug !== "" && l.project === slug);
 
   function add(lessons: LessonEntry[]) {
     for (const l of lessons) {
-      if (!seen.has(l.id)) {
+      if (visible(l) && !seen.has(l.id)) {
         seen.add(l.id);
         result.push(l);
       }
@@ -227,7 +236,6 @@ function getRelevantLessons(store: MemoryStore, prompt: string, cwd?: string): L
   add(store.searchLessons(prompt, LESSON_SEARCH_LIMIT));
 
   // 2. Search by project slug if we have a cwd
-  const slug = cwd ? projectSlug(cwd) : "";
   if (slug) {
     add(store.searchLessons(slug, 5));
   }
@@ -274,7 +282,8 @@ function buildFallbackBlock(store: MemoryStore, cwd?: string): ContextBlock {
     semanticCount += tools.length;
   }
 
-  const lessons = store.listLessons(undefined, 50, slug || undefined);
+  const lessons = store.listLessons(undefined, 50, slug || undefined)
+    .filter(l => !l.project || (slug !== "" && l.project === slug));
   if (lessons.length > 0) {
     const corrections = lessons.filter(l => l.negative);
     const positives = lessons.filter(l => !l.negative);

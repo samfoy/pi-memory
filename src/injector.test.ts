@@ -164,4 +164,20 @@ describe("buildContextBlock", () => {
     assert.equal(stats.semantic, 0);
     assert.ok(stats.lessons > 0);
   });
+
+  it("project-tagged lessons never leak into other projects", async () => {
+    store.addLesson("PROJECT-TAG-ONLY keep this inside rosie", "general", "user", false, "rosie");
+
+    const inside = await buildContextBlock(store, "/workplace/samfp/Rosie", "PROJECT-TAG-ONLY", { lessonInjection: "selective" });
+    assert.ok(inside.text.includes("PROJECT-TAG-ONLY"), "project lesson visible inside its project");
+
+    const outside = await buildContextBlock(store, "/home/user/projects/other", "PROJECT-TAG-ONLY", { lessonInjection: "selective" });
+    assert.ok(!outside.text.includes("PROJECT-TAG-ONLY"), "project lesson hidden in another project");
+
+    const noCwd = await buildContextBlock(store, undefined, "PROJECT-TAG-ONLY", { lessonInjection: "selective" });
+    assert.ok(!noCwd.text.includes("PROJECT-TAG-ONLY"), "project lesson hidden without a cwd");
+
+    const fallback = await buildContextBlock(store, "/home/user/projects/other");
+    assert.ok(!fallback.text.includes("PROJECT-TAG-ONLY"), "fallback hides project lesson in another project");
+  });
 });
