@@ -453,8 +453,6 @@ async function buildContextBlock(store, cwd, prompt, config) {
 }
 async function buildSelectiveBlock(store, prompt, cwd, config) {
   const sections = [];
-  let semanticCount = 0;
-  let lessonCount = 0;
   const mode = config?.lessonInjection ?? "all";
   const results = store.searchSemantic(prompt, SEARCH_LIMIT);
   const slug = cwd ? projectSlug(cwd) : "";
@@ -487,40 +485,13 @@ async function buildSelectiveBlock(store, prompt, cwd, config) {
     }
   }
   if (filteredResults.length > 0) {
-    sections.push(formatSection("Relevant Memory", filteredResults.map(formatSemantic)));
-    semanticCount = filteredResults.length;
-    store.touchAccessed(filteredResults.map((r) => r.key));
+    sections.push(semanticSection("Relevant Memory", filteredResults));
   }
   const lessons = mode === "selective" ? getRelevantLessons(store, prompt, cwd) : store.listLessons(void 0, 50, slug || void 0);
-  if (lessons.length > 0) {
-    const corrections = lessons.filter((l) => l.negative);
-    const positives = lessons.filter((l) => !l.negative);
-    if (corrections.length > 0) {
-      const formatted = corrections.map(
-        (l) => `DON'T: ${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Learned Corrections", formatted));
-    }
-    if (positives.length > 0) {
-      const formatted = positives.map(
-        (l) => `${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Validated Approaches", formatted));
-    }
-    lessonCount = lessons.length;
-  }
-  if (sections.length === 0) {
-    return { text: "", stats: { semantic: 0, lessons: 0 } };
-  }
-  let text = `<memory>
-${sections.join("\n")}
-
-${MEMORY_DRIFT_CAVEAT}
-</memory>`;
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>";
-  }
-  return { text, stats: { semantic: semanticCount, lessons: lessonCount } };
+  sections.push(...lessonSections(lessons));
+  const block = fitContextBlock(sections);
+  store.touchAccessed(block.keys);
+  return { text: block.text, stats: block.stats };
 }
 function getRelevantLessons(store, prompt, cwd) {
   const seen = /* @__PURE__ */ new Set();
@@ -543,69 +514,79 @@ function getRelevantLessons(store, prompt, cwd) {
 }
 function buildFallbackBlock(store, cwd) {
   const sections = [];
-  let semanticCount = 0;
-  let lessonCount = 0;
   const prefs = store.listSemantic("pref.", 50);
-  if (prefs.length > 0) {
-    sections.push(formatSection("User Preferences", prefs.map(formatSemantic)));
-    semanticCount += prefs.length;
-  }
+  sections.push(semanticSection("User Preferences", prefs));
   const projects = store.listSemantic("project.", 50);
   const slug = cwd ? projectSlug(cwd) : "";
-  const relevant = slug ? projects.filter((p) => {
-    const parts = p.key.split(".");
-    return parts.length >= 2 && parts[1] === slug;
-  }) : projects;
-  if (relevant.length > 0) {
-    sections.push(formatSection("Project Context", relevant.map(formatSemantic)));
-    semanticCount += relevant.length;
-  }
+  const relevant = slug ? projects.filter((p) => p.key.split(".")[1] === slug) : projects;
+  sections.push(semanticSection("Project Context", relevant));
   const tools = store.listSemantic("tool.", 20);
-  if (tools.length > 0) {
-    sections.push(formatSection("Tool Preferences", tools.map(formatSemantic)));
-    semanticCount += tools.length;
-  }
+  sections.push(semanticSection("Tool Preferences", tools));
   const lessons = store.listLessons(void 0, 50, slug || void 0);
-  if (lessons.length > 0) {
-    const corrections = lessons.filter((l) => l.negative);
-    const positives = lessons.filter((l) => !l.negative);
-    if (corrections.length > 0) {
-      const formatted = corrections.map(
-        (l) => `DON'T: ${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Learned Corrections", formatted));
-    }
-    if (positives.length > 0) {
-      const formatted = positives.map(
-        (l) => `${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Validated Approaches", formatted));
-    }
-    lessonCount = lessons.length;
-  }
+  sections.push(...lessonSections(lessons));
   const user = store.listSemantic("user.", 10);
-  if (user.length > 0) {
-    sections.push(formatSection("User", user.map(formatSemantic)));
-    semanticCount += user.length;
-  }
-  if (sections.length === 0) {
-    return { text: "", stats: { semantic: 0, lessons: 0 } };
-  }
-  let text = `<memory>
-${sections.join("\n")}
-
-${MEMORY_DRIFT_CAVEAT}
-</memory>`;
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>";
-  }
-  return { text, stats: { semantic: semanticCount, lessons: lessonCount } };
+  sections.push(semanticSection("User", user));
+  const { text, stats } = fitContextBlock(sections);
+  return { text, stats };
 }
 var STALE_WARNING_DAYS = 30;
 var VERY_STALE_DAYS = 90;
-function formatSection(title, items) {
-  return `## ${title}
-${items.map((i) => `- ${i}`).join("\n")}`;
+function semanticSection(title, entries) {
+  return { title, items: entries.map((entry) => ({ text: formatSemantic(entry), key: entry.key })) };
+}
+function lessonSections(lessons) {
+  return [
+    {
+      title: "Learned Corrections",
+      items: lessons.filter((l) => l.negative).map((l) => ({
+        text: `DON'T: ${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
+      }))
+    },
+    {
+      title: "Validated Approaches",
+      items: lessons.filter((l) => !l.negative).map((l) => ({
+        text: `${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
+      }))
+    }
+  ];
+}
+function fitContextBlock(sections) {
+  const kept = sections.map((section) => ({ title: section.title, items: [...section.items] }));
+  const candidates = sections.flatMap(
+    (section, index) => section.items.map((item) => ({ item, index }))
+  );
+  if (candidates.length === 0) {
+    return { text: "", stats: { semantic: 0, lessons: 0 }, keys: [] };
+  }
+  candidates.sort((a, b) => Number(a.item.key !== void 0) - Number(b.item.key !== void 0));
+  const render = (omitted2) => {
+    const body = kept.filter((section) => section.items.length > 0).map((section) => `## ${section.title}
+${section.items.map((item) => `- ${item.text}`).join("\n")}`).join("\n");
+    const notice = omitted2 ? "\n... (additional memory entries omitted)" : "";
+    return `<memory>
+${body}${notice}
+
+${MEMORY_DRIFT_CAVEAT}
+</memory>`;
+  };
+  let omitted = false;
+  if (render(false).length > MAX_CONTEXT_CHARS) {
+    for (const section of kept) section.items = [];
+    for (const { item, index } of candidates) {
+      kept[index].items.push(item);
+      if (render(true).length > MAX_CONTEXT_CHARS) {
+        kept[index].items.pop();
+        omitted = true;
+      }
+    }
+  }
+  const items = kept.flatMap((section) => section.items);
+  const keys = items.flatMap((item) => item.key === void 0 ? [] : [item.key]);
+  return {
+    text: render(omitted),
+    stats: { semantic: keys.length, lessons: items.length - keys.length },
+    keys
+  };
 }
 function formatSemantic(entry) {
   const key = entry.key.split(".").slice(1).join(".");

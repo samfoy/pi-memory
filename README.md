@@ -87,6 +87,8 @@ By default (since 1.5.0), memory is retrieved **per turn** against the current p
 
 Retrieval is FTS5 keyword search by default; vector matching is available as an opt-in — see [Semantic search](#semantic-search).
 
+Both per-turn and startup fallback blocks are capped at 8,000 characters. Entries are included whole rather than cut mid-fact or mid-lesson. Lessons receive budget priority over facts, while section order and relative relevance order are preserved. Oversized entries are skipped so smaller entries can still fit; a notice marks omitted entries. The memory-drift caveat and closing tag are always retained, and injection counts reflect only included entries.
+
 | Setting | Behavior |
 |---------|----------|
 | *(default)* | Per-turn retrieval, `context-hook` injection |
