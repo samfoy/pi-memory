@@ -166,9 +166,36 @@ export class MemoryStore {
         END;
       `);
 
-      // Rebuild FTS indexes from existing data (idempotent)
-      this.db.exec(`INSERT INTO semantic_fts(semantic_fts) VALUES('rebuild')`);
-      this.db.exec(`INSERT INTO lessons_fts(lessons_fts) VALUES('rebuild')`);
+      // Rebuild the FTS indexes only when they are actually out of sync.
+      //
+      // This runs on every store open — every session_start, /new and /resume —
+      // and an unconditional rebuild re-indexes rows the triggers above already
+      // keep current; on a machine with slow commits that is the dominant part
+      // of store construction. Counting `_docsize` (one row per indexed
+      // document) is the cheap way to see a stale index: `COUNT(*)` on an
+      // external-content FTS5 table re-reads the content table and therefore
+      // always matches, so it cannot detect one.
+      let ftsInSync = false;
+      try {
+        const guard = this.db
+          .prepare(
+            `SELECT (SELECT COUNT(*) FROM semantic) = (SELECT COUNT(*) FROM semantic_fts_docsize)
+                AND (SELECT COUNT(*) FROM lessons) = (SELECT COUNT(*) FROM lessons_fts_docsize) AS ok`,
+          )
+          // Bun's .get() returns null where Node returns undefined.
+          .get() as { ok: number } | null | undefined;
+        ftsInSync = !!guard && guard.ok === 1;
+      } catch {
+        // No `_docsize` shadow table (e.g. columnsize=0) — rebuild to be safe.
+        ftsInSync = false;
+      }
+      if (!ftsInSync) {
+        // One transaction: the two rebuilds otherwise commit separately.
+        this.db.exec("BEGIN");
+        this.db.exec(`INSERT INTO semantic_fts(semantic_fts) VALUES('rebuild')`);
+        this.db.exec(`INSERT INTO lessons_fts(lessons_fts) VALUES('rebuild')`);
+        this.db.exec("COMMIT");
+      }
       this.hasFTS5 = true;
     } catch {
       // FTS5 not available (node:sqlite compiled without SQLITE_ENABLE_FTS5).

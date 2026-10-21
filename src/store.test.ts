@@ -1,9 +1,27 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MemoryStore } from "./store.js";
+
+// Same Node/Bun split as store.ts — these tests inspect the index from outside.
+const require = createRequire(import.meta.url);
+const DatabaseSync: new (path: string) => any =
+  typeof (globalThis as any).Bun !== "undefined"
+    ? require("bun:sqlite").Database
+    : require("node:sqlite").DatabaseSync;
+
+/** Rows in an FTS5 shadow table, read without going through MemoryStore. */
+function shadowCount(dbPath: string, table: string): number {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get().c;
+  } finally {
+    db.close();
+  }
+}
 
 describe("MemoryStore", () => {
   let store: MemoryStore;
@@ -196,6 +214,45 @@ describe("MemoryStore", () => {
       const rules = all.map(l => l.rule);
       assert.ok(rules.some(r => r.includes("Rise-specific")));
       assert.ok(rules.some(r => r.includes("Global rule")));
+    });
+  });
+
+  describe("fts index maintenance", () => {
+    it("keeps search working across a reopen with an in-sync index", () => {
+      const dbPath = join(tmpDir, "reopen.db");
+      const first = new MemoryStore(dbPath);
+      first.setSemantic("pref.reopen", "survives a reopen", 0.9, "user");
+      first.close();
+
+      // Reopening must not need a rebuild to stay searchable.
+      const second = new MemoryStore(dbPath);
+      try {
+        assert.ok(second.searchSemantic("reopen", 5).some(h => h.key === "pref.reopen"));
+      } finally {
+        second.close();
+      }
+    });
+
+    it("rebuilds a stale index on open", () => {
+      const dbPath = join(tmpDir, "stale.db");
+      const first = new MemoryStore(dbPath);
+      first.setSemantic("pref.stale", "index this row", 0.9, "user");
+      first.close();
+
+      // Simulate an index that lost its documents (pre-FTS migration, dropped
+      // trigger, manual tampering) while the content table kept the rows.
+      const raw = new DatabaseSync(dbPath);
+      raw.exec(`INSERT INTO semantic_fts(semantic_fts) VALUES('delete-all')`);
+      raw.close();
+      assert.equal(shadowCount(dbPath, "semantic_fts_docsize"), 0);
+
+      const reopened = new MemoryStore(dbPath);
+      try {
+        assert.ok(reopened.searchSemantic("stale", 5).some(h => h.key === "pref.stale"));
+      } finally {
+        reopened.close();
+      }
+      assert.equal(shadowCount(dbPath, "semantic_fts_docsize"), 1);
     });
   });
 
