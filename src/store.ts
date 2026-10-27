@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { cosine, fromBlob } from "./vector.js";
+import { projectSlug } from "./project.js";
 
 // node:module / createRequire is available in both Node and Bun.
 const _require = createRequire(import.meta.url);
@@ -127,6 +128,10 @@ export class MemoryStore {
     } catch {
       // Column already exists — ignore
     }
+    // Older releases stored the full cwd as the lesson project on Windows.
+    // Convert those values to the canonical slug so upgrades retain them.
+    this.migrateLegacyLessonProjects();
+
     // Migration: add embedding column for semantic vector search
     try {
       this.db.exec(`ALTER TABLE semantic ADD COLUMN embedding BLOB`);
@@ -175,6 +180,21 @@ export class MemoryStore {
       // Search will use substring fallback — fine for typical memory store sizes.
       this.hasFTS5 = false;
     }
+  }
+
+  private migrateLegacyLessonProjects(): void {
+    this.withLock(() => {
+      const rows = this.db.prepare(
+        "SELECT DISTINCT project FROM lessons WHERE project IS NOT NULL"
+      ).all() as { project: string }[];
+      const update = this.db.prepare("UPDATE lessons SET project = ? WHERE project = ?");
+
+      for (const row of rows) {
+        if (!row.project.includes("/") && !row.project.includes("\\")) continue;
+        const slug = projectSlug(row.project);
+        if (slug && slug !== row.project) update.run(slug, row.project);
+      }
+    });
   }
 
   /**

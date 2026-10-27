@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MemoryStore } from "./store.js";
-import { buildContextBlock } from "./injector.js";
+import { buildContextBlock, projectSlug } from "./injector.js";
 
 describe("buildContextBlock", () => {
   let store: MemoryStore;
@@ -55,6 +55,22 @@ describe("buildContextBlock", () => {
     const { text } = await buildContextBlock(store, "/workplace/samfp/Rosie");
     assert.ok(text.includes("rosie.lang"));
     assert.ok(!text.includes("other.lang"));
+  });
+
+  it("normalizes Windows path separators for project-scoped memory", async () => {
+    const slashCwd = "C:/PY/WVM_DEV/worktrees/media-vision-settings";
+    const backslashCwd = String.raw`C:\PY\WVM_DEV\worktrees\media-vision-settings`;
+    store.setSemantic("project.media-vision-settings.editor", "vscode", 0.9, "consolidation");
+    store.addLesson("Use the media-vision-settings harness", "testing", "consolidation", false, "media-vision-settings");
+
+    const slashContext = await buildContextBlock(store, slashCwd);
+    const backslashContext = await buildContextBlock(store, backslashCwd);
+
+    assert.equal(projectSlug(backslashCwd), projectSlug(slashCwd));
+    assert.ok(backslashContext.text.includes("media-vision-settings.editor"));
+    assert.ok(backslashContext.text.includes("media-vision-settings harness"));
+    assert.equal(backslashContext.stats.semantic, slashContext.stats.semantic);
+    assert.equal(backslashContext.stats.lessons, slashContext.stats.lessons);
   });
 
   it("fallback: excludes other-project facts even when user-set (confidence 0.95)", async () => {
