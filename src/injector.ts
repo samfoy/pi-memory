@@ -7,15 +7,33 @@
  * - Fallback (no prompt): dump top entries by prefix (old behavior).
  */
 import type { MemoryStore, SemanticEntry, LessonEntry } from "./store.js";
+import { createHash } from "node:crypto";
 import os from "node:os";
 
 const MAX_CONTEXT_CHARS = 8000;
 const SEARCH_LIMIT = 15;
 const LESSON_SEARCH_LIMIT = 15;
 
+export interface RecallIds {
+  semantic: string[];
+  lessons: string[];
+}
+
+export interface Recalled {
+  semantic: ReadonlySet<string>;
+  lessons: ReadonlySet<string>;
+}
+
 export interface ContextBlock {
   text: string;
   stats: { semantic: number; lessons: number };
+  included: RecallIds;
+}
+
+const NOTHING_RECALLED: Recalled = { semantic: new Set(), lessons: new Set() };
+
+export function semanticRecallId(entry: SemanticEntry): string {
+  return `${entry.key}#${createHash("sha256").update(entry.value).digest("hex").slice(0, 12)}`;
 }
 
 /**
@@ -54,24 +72,7 @@ export interface InjectorConfig {
    * memory, 8KB cap) is injected as a hidden message at session_start.
    */
   perTurnInjection?: boolean;
-  /**
-   * Controls how per-turn memory is spliced into the LLM context.
-   * Only relevant when perTurnInjection is not false.
-   *
-   * "context-hook" (default): memory is injected as an ephemeral custom
-   *   message immediately before the latest user message, via the
-   *   pi.on("context") hook. The system prompt is never modified — it
-   *   caches unconditionally. A memory content change only causes a cache
-   *   miss at the injection point and forward (not from the system prompt
-   *   root). Injected messages are NOT persisted to session history or
-   *   fed back into consolidation.
-   *
-   * "system-prompt" (legacy v1.4.0 behavior): memory is appended to
-   *   event.systemPrompt in before_agent_start. Cache-stable when memory
-   *   content is unchanged, but a topic shift causes a cache miss that
-   *   cascades from the system prompt root through all downstream messages.
-   */
-  injectionMode?: "system-prompt" | "context-hook";
+  injectionMode?: "system-prompt" | "message";
   /**
    * Model string passed to `pi --model` for session-end consolidation.
    * When omitted, the built-in default is used.  Useful for users on
@@ -89,16 +90,22 @@ export interface InjectorConfig {
  * Build context block. When `prompt` is provided, uses selective injection
  * (search-based). Otherwise falls back to prefix-based dump.
  */
-export async function buildContextBlock(store: MemoryStore, cwd?: string, prompt?: string, config?: InjectorConfig): Promise<ContextBlock> {
+export async function buildContextBlock(
+  store: MemoryStore,
+  cwd?: string,
+  prompt?: string,
+  config?: InjectorConfig,
+  recalled: Recalled = NOTHING_RECALLED,
+): Promise<ContextBlock> {
   if (prompt?.trim()) {
-    return buildSelectiveBlock(store, prompt, cwd, config);
+    return buildSelectiveBlock(store, prompt, cwd, config, recalled);
   }
   return buildFallbackBlock(store, cwd);
 }
 
 // ─── Selective injection ─────────────────────────────────────────────
 
-async function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: string, config?: InjectorConfig): Promise<ContextBlock> {
+async function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd: string | undefined, config: InjectorConfig | undefined, recalled: Recalled): Promise<ContextBlock> {
   const sections: string[] = [];
   let semanticCount = 0;
   let lessonCount = 0;
@@ -154,49 +161,48 @@ async function buildSelectiveBlock(store: MemoryStore, prompt: string, cwd?: str
     }
   }
 
-  if (filteredResults.length > 0) {
-    sections.push(formatSection("Relevant Memory", filteredResults.map(formatSemantic)));
-    semanticCount = filteredResults.length;
-
-    // Track access time for these memories
-    store.touchAccessed(filteredResults.map(r => r.key));
+  const freshSemantic = filteredResults.filter(r => !recalled.semantic.has(semanticRecallId(r)));
+  const semanticLines = freshSemantic.map(r => ({ id: semanticRecallId(r), line: formatSemantic(r) }));
+  if (semanticLines.length > 0) {
+    sections.push(formatSection("Relevant Memory", semanticLines.map(l => l.line)));
+    semanticCount = semanticLines.length;
   }
 
-  // Inject lessons — either all or filtered by relevance + project scope
-  const lessons = mode === "selective"
+  const lessons = (mode === "selective"
     ? getRelevantLessons(store, prompt, cwd)
-    : store.listLessons(undefined, 50, slug || undefined);
-
-  if (lessons.length > 0) {
-    const corrections = lessons.filter(l => l.negative);
-    const positives = lessons.filter(l => !l.negative);
-
-    if (corrections.length > 0) {
-      const formatted = corrections.map(l =>
-        `DON'T: ${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Learned Corrections", formatted));
-    }
-    if (positives.length > 0) {
-      const formatted = positives.map(l =>
-        `${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Validated Approaches", formatted));
-    }
-    lessonCount = lessons.length;
-  }
+    : store.listLessons(undefined, 50, slug || undefined)
+  ).filter(l => !recalled.lessons.has(l.id));
+  const lessonLines = lessonSections(lessons, sections);
+  lessonCount = lessons.length;
 
   if (sections.length === 0) {
-    return { text: "", stats: { semantic: 0, lessons: 0 } };
+    return { text: "", stats: { semantic: 0, lessons: 0 }, included: { semantic: [], lessons: [] } };
   }
 
-  let text = `<memory>\n${sections.join("\n")}\n\n${MEMORY_DRIFT_CAVEAT}\n</memory>`;
+  const text = capped(`<memory>\n${sections.join("\n")}\n\n${MEMORY_DRIFT_CAVEAT}\n</memory>`);
+  const included = { semantic: shownIn(text, semanticLines), lessons: shownIn(text, lessonLines) };
+  store.touchAccessed(freshSemantic.filter(r => included.semantic.includes(semanticRecallId(r))).map(r => r.key));
 
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>";
-  }
+  return { text, stats: { semantic: semanticCount, lessons: lessonCount }, included };
+}
 
-  return { text, stats: { semantic: semanticCount, lessons: lessonCount } };
+function lessonSections(lessons: LessonEntry[], sections: string[]): { id: string; line: string }[] {
+  const tag = (l: LessonEntry) => (l.category !== "general" ? ` [${l.category}]` : "");
+  const corrections = lessons.filter(l => l.negative).map(l => ({ id: l.id, line: `DON'T: ${l.rule}${tag(l)}` }));
+  const positives = lessons.filter(l => !l.negative).map(l => ({ id: l.id, line: `${l.rule}${tag(l)}` }));
+  if (corrections.length > 0) sections.push(formatSection("Learned Corrections", corrections.map(l => l.line)));
+  if (positives.length > 0) sections.push(formatSection("Validated Approaches", positives.map(l => l.line)));
+  return [...corrections, ...positives];
+}
+
+function capped(text: string): string {
+  return text.length > MAX_CONTEXT_CHARS
+    ? text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>"
+    : text;
+}
+
+function shownIn(text: string, lines: { id: string; line: string }[]): string[] {
+  return lines.filter(l => text.includes(`\n- ${l.line}\n`)).map(l => l.id);
 }
 
 // ─── Selective lesson injection ──────────────────────────────────────
@@ -275,24 +281,8 @@ function buildFallbackBlock(store: MemoryStore, cwd?: string): ContextBlock {
   }
 
   const lessons = store.listLessons(undefined, 50, slug || undefined);
-  if (lessons.length > 0) {
-    const corrections = lessons.filter(l => l.negative);
-    const positives = lessons.filter(l => !l.negative);
-
-    if (corrections.length > 0) {
-      const formatted = corrections.map(l =>
-        `DON'T: ${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Learned Corrections", formatted));
-    }
-    if (positives.length > 0) {
-      const formatted = positives.map(l =>
-        `${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Validated Approaches", formatted));
-    }
-    lessonCount = lessons.length;
-  }
+  lessonSections(lessons, sections);
+  lessonCount = lessons.length;
 
   const user = store.listSemantic("user.", 10);
   if (user.length > 0) {
@@ -301,16 +291,11 @@ function buildFallbackBlock(store: MemoryStore, cwd?: string): ContextBlock {
   }
 
   if (sections.length === 0) {
-    return { text: "", stats: { semantic: 0, lessons: 0 } };
+    return { text: "", stats: { semantic: 0, lessons: 0 }, included: { semantic: [], lessons: [] } };
   }
 
-  let text = `<memory>\n${sections.join("\n")}\n\n${MEMORY_DRIFT_CAVEAT}\n</memory>`;
-
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>";
-  }
-
-  return { text, stats: { semantic: semanticCount, lessons: lessonCount } };
+  const text = capped(`<memory>\n${sections.join("\n")}\n\n${MEMORY_DRIFT_CAVEAT}\n</memory>`);
+  return { text, stats: { semantic: semanticCount, lessons: lessonCount }, included: { semantic: [], lessons: [] } };
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────

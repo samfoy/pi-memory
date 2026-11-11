@@ -24,7 +24,7 @@ import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { MemoryStore, type SemanticEntry } from "./store.js";
-import { buildContextBlock, projectSlug, type InjectorConfig } from "./injector.js";
+import { buildContextBlock, projectSlug, type InjectorConfig, type Recalled, type RecallIds } from "./injector.js";
 import {
   createEmbedder,
   diagnoseEmbedderError,
@@ -177,7 +177,7 @@ function mergeMemorySettings(config: InjectorConfig, memorySettings: unknown): v
   if (typeof m.perTurnInjection === "boolean") {
     config.perTurnInjection = m.perTurnInjection;
   }
-  if (m.injectionMode === "system-prompt" || m.injectionMode === "context-hook") {
+  if (m.injectionMode === "system-prompt" || m.injectionMode === "message") {
     config.injectionMode = m.injectionMode;
   }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
@@ -263,6 +263,26 @@ export function readSettingsConfig(cwd?: string): InjectorConfig {
   }
 
   return config;
+}
+
+const RECALL_MESSAGE_TYPE = "pi-memory-recall";
+
+interface ContextEntrySource {
+  buildContextEntries?: () => SessionEntry[];
+  getBranch?: () => SessionEntry[];
+}
+
+function recalledInContext(sessionManager: ContextEntrySource): Recalled {
+  const entries = sessionManager.buildContextEntries?.() ?? sessionManager.getBranch?.() ?? [];
+  const semantic = new Set<string>();
+  const lessons = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type !== "custom_message" || entry.customType !== RECALL_MESSAGE_TYPE) continue;
+    const ids = entry.details as Partial<RecallIds> | undefined;
+    for (const id of ids?.semantic ?? []) semantic.add(id);
+    for (const id of ids?.lessons ?? []) lessons.add(id);
+  }
+  return { semantic, lessons };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -424,11 +444,6 @@ export default function (pi: ExtensionAPI) {
       .map((r) => r.item);
   }
 
-  // Per-turn memory block computed by before_agent_start and spliced into the
-  // LLM request by the "context" hook (context-hook injection mode). Ephemeral:
-  // never persisted to session history or the consolidation queue.
-  let pendingContextBlock: string | null = null;
-
   // ─── Lifecycle ───────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
@@ -543,76 +558,19 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // ----------------------------------------------------------------
-  // Per-turn semantic injection (default). Runs on every user turn, searching
-  // memory relevant to the current prompt. Two injection strategies, selected
-  // by `injectionMode`:
-  //
-  //   "context-hook" (default) — stash the block here; the pi.on("context")
-  //     handler below splices it as an ephemeral message just before the
-  //     latest user message. The system prompt is NEVER modified, so its
-  //     prefix caches unconditionally; a memory change only misses the cache
-  //     from the injection point forward, not from the system-prompt root.
-  //
-  //   "system-prompt" (legacy v1.4.0) — append the block to event.systemPrompt.
-  //     Cache-stable only while the retrieved memory is unchanged; any change
-  //     (e.g. a topic shift retrieving different entries) invalidates the
-  //     prefix at the system-prompt root and rewrites the entire suffix at
-  //     cacheWrite rates.
-  //
-  // Correctness holds either way: systemPrompt is a separate field from the
-  // messages list, and the ephemeral recall message is inserted BEFORE the
-  // user's message, so the user's question remains the final user-role turn.
-  // ----------------------------------------------------------------
   pi.on("before_agent_start", async (event, ctx) => {
     if (!store) return;
     if (injectorConfig.perTurnInjection === false) return;
 
-    const { text } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
-    const mode = injectorConfig.injectionMode ?? "context-hook";
-
-    if (mode === "system-prompt") {
-      pendingContextBlock = null;
-      if (!text) return;
-      return { systemPrompt: `${event.systemPrompt}\n\n${text}` };
+    if (injectorConfig.injectionMode === "system-prompt") {
+      const { text } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
+      return text ? { systemPrompt: `${event.systemPrompt}\n\n${text}` } : undefined;
     }
 
-    // context-hook: never touch the system prompt; hand off to the context hook.
-    pendingContextBlock = text || null;
-    return;
-  });
-
-  // context-hook injection. Fires on every LLM call within a turn; splices the
-  // cached memory block as an ephemeral user message immediately BEFORE the
-  // latest user message — on every call, including tool-call continuations.
-  // Keeping the block at a stable position (just before the user turn) means
-  // the persisted history never contains it, so the prefix caches and each
-  // continuation grows append-only. The injected message is not written to
-  // agent.state.messages, session history, or the consolidation queue.
-  pi.on("context", async (event, _ctx) => {
-    if (!store) return;
-    if (injectorConfig.perTurnInjection === false) return;
-    if ((injectorConfig.injectionMode ?? "context-hook") !== "context-hook") return;
-    if (!pendingContextBlock) return;
-
-    const msgs = event.messages;
-    if (!msgs || msgs.length === 0) return;
-
-    // Insert before the latest user message (not merely the last message):
-    // on continuations the last message is a tool result, but the user turn
-    // is still where the memory belongs.
-    let idx = -1;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if ((msgs[i] as any).role === "user") { idx = i; break; }
-    }
-    if (idx === -1) return;
-
-    const recallMessage = {
-      role: "user",
-      content: pendingContextBlock,
-      timestamp: Date.now(),
-    } as any;
-    return { messages: [...msgs.slice(0, idx), recallMessage, ...msgs.slice(idx)] };
+    if (!event.prompt?.trim()) return;
+    const { text, included } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig, recalledInContext(ctx.sessionManager));
+    if (!text) return;
+    return { message: { customType: RECALL_MESSAGE_TYPE, content: text, display: false, details: included } };
   });
 
 

@@ -165,3 +165,45 @@ describe("buildContextBlock", () => {
     assert.ok(stats.lessons > 0);
   });
 });
+
+describe("buildContextBlock recall tracking", () => {
+  let store: MemoryStore;
+  let tmpDir: string;
+
+  before(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "pi-memory-recall-test-"));
+    store = new MemoryStore(join(tmpDir, "test.db"));
+  });
+
+  after(() => {
+    store.close();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("reports what it included and leaves out what was already recalled", async () => {
+    store.setSemantic("pref.shell", "zsh with starship prompt", 0.9, "user");
+    store.addLesson("Run the shell linter before committing", "shell", "user", false);
+
+    const first = await buildContextBlock(store, undefined, "which shell prompt?");
+    assert.equal(first.included.semantic.length, 1);
+    assert.equal(first.included.lessons.length, 1);
+
+    const recalled = { semantic: new Set(first.included.semantic), lessons: new Set(first.included.lessons) };
+    const second = await buildContextBlock(store, undefined, "which shell prompt?", undefined, recalled);
+    assert.equal(second.text, "");
+    assert.deepEqual(second.included, { semantic: [], lessons: [] });
+  });
+
+  it("does not count entries cut by the size cap as included", async () => {
+    for (let i = 0; i < 12; i++) store.setSemantic(`pref.big${i}`, `bigvalue ${"x".repeat(900)} ${i}`, 0.9, "user");
+
+    const first = await buildContextBlock(store, undefined, "bigvalue");
+    assert.ok(first.text.endsWith("... (truncated)\n</memory>"));
+    for (const id of first.included.semantic) assert.ok(first.text.includes(id.split("#")[0]!.split(".").slice(1).join(".")));
+
+    const recalled = { semantic: new Set(first.included.semantic), lessons: new Set(first.included.lessons) };
+    const second = await buildContextBlock(store, undefined, "bigvalue", undefined, recalled);
+    assert.ok(second.included.semantic.length > 0, "entries cut off last time come back");
+    for (const id of second.included.semantic) assert.ok(!recalled.semantic.has(id));
+  });
+});

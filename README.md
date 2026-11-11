@@ -79,24 +79,26 @@ Only facts with confidence ≥ 0.8 are stored. Lessons are deduplicated using ex
 
 ### Injection
 
-By default (since 1.5.0), memory is retrieved **per turn** against the current prompt and injected through pi's `context` hook (`injectionMode: "context-hook"`):
+By default, memory is retrieved **per turn** against the current prompt and added to the session as one hidden message (customType `pi-memory-recall`, `injectionMode: "message"`):
 
-- The block is inserted as an ephemeral message immediately **before** the latest user message, on every LLM call in the turn (including tool-call continuations), so the user's question stays the last user-role turn.
-- The system prompt is never modified, so its prefix cache always hits. A change in retrieved memory only misses the cache from the injection point forward.
-- The injected block is not persisted to session history and is not fed back into consolidation.
+- The message is stored in session history right after the user's prompt, like any other extension message. Earlier turns are never rewritten, so the prompt cache keeps hitting and providers that preserve reasoning (Claude Fable 5.2 and other adaptive-thinking models) keep it.
+- Each message carries only memory the active context does not already hold. A fact is recalled again when its value changes, or after compaction drops the message that carried it.
+- Runs started by an extension message (no user prompt) add nothing.
+
+Before 1.7.0 the default was `context-hook`, which spliced the block in front of the latest user message on every request without storing it. Each new turn then changed earlier history, which broke the prompt cache and made Bedrock drop earlier reasoning. The setting value `"context-hook"` is now read as the default.
 
 Retrieval is FTS5 keyword search by default; vector matching is available as an opt-in — see [Semantic search](#semantic-search).
 
 | Setting | Behavior |
 |---------|----------|
-| *(default)* | Per-turn retrieval, `context-hook` injection |
+| *(default)* | Per-turn retrieval, stored as a hidden `pi-memory-recall` message |
 | `"injectionMode": "system-prompt"` | Per-turn retrieval appended to the system prompt (legacy 1.4.x). A topic shift invalidates the prefix cache from the system prompt onward. |
 | `"perTurnInjection": false` | No per-turn retrieval. One hidden `<memory>` message (customType `pi-memory-context`) is injected once at `session_start` with a fallback dump of preferences, cwd project context, tool preferences, lessons and identity, capped at 8KB. |
 
 ```json
 {
   "memory": {
-    "injectionMode": "context-hook"
+    "injectionMode": "message"
   }
 }
 ```

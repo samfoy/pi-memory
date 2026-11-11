@@ -441,17 +441,22 @@ function jaccard(a, b) {
 }
 
 // src/injector.ts
+import { createHash } from "node:crypto";
 import os from "node:os";
 var MAX_CONTEXT_CHARS = 8e3;
 var SEARCH_LIMIT = 15;
 var LESSON_SEARCH_LIMIT = 15;
-async function buildContextBlock(store, cwd, prompt, config) {
+var NOTHING_RECALLED = { semantic: /* @__PURE__ */ new Set(), lessons: /* @__PURE__ */ new Set() };
+function semanticRecallId(entry) {
+  return `${entry.key}#${createHash("sha256").update(entry.value).digest("hex").slice(0, 12)}`;
+}
+async function buildContextBlock(store, cwd, prompt, config, recalled = NOTHING_RECALLED) {
   if (prompt?.trim()) {
-    return buildSelectiveBlock(store, prompt, cwd, config);
+    return buildSelectiveBlock(store, prompt, cwd, config, recalled);
   }
   return buildFallbackBlock(store, cwd);
 }
-async function buildSelectiveBlock(store, prompt, cwd, config) {
+async function buildSelectiveBlock(store, prompt, cwd, config, recalled) {
   const sections = [];
   let semanticCount = 0;
   let lessonCount = 0;
@@ -486,41 +491,42 @@ async function buildSelectiveBlock(store, prompt, cwd, config) {
       }
     }
   }
-  if (filteredResults.length > 0) {
-    sections.push(formatSection("Relevant Memory", filteredResults.map(formatSemantic)));
-    semanticCount = filteredResults.length;
-    store.touchAccessed(filteredResults.map((r) => r.key));
+  const freshSemantic = filteredResults.filter((r) => !recalled.semantic.has(semanticRecallId(r)));
+  const semanticLines = freshSemantic.map((r) => ({ id: semanticRecallId(r), line: formatSemantic(r) }));
+  if (semanticLines.length > 0) {
+    sections.push(formatSection("Relevant Memory", semanticLines.map((l) => l.line)));
+    semanticCount = semanticLines.length;
   }
-  const lessons = mode === "selective" ? getRelevantLessons(store, prompt, cwd) : store.listLessons(void 0, 50, slug || void 0);
-  if (lessons.length > 0) {
-    const corrections = lessons.filter((l) => l.negative);
-    const positives = lessons.filter((l) => !l.negative);
-    if (corrections.length > 0) {
-      const formatted = corrections.map(
-        (l) => `DON'T: ${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Learned Corrections", formatted));
-    }
-    if (positives.length > 0) {
-      const formatted = positives.map(
-        (l) => `${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Validated Approaches", formatted));
-    }
-    lessonCount = lessons.length;
-  }
+  const lessons = (mode === "selective" ? getRelevantLessons(store, prompt, cwd) : store.listLessons(void 0, 50, slug || void 0)).filter((l) => !recalled.lessons.has(l.id));
+  const lessonLines = lessonSections(lessons, sections);
+  lessonCount = lessons.length;
   if (sections.length === 0) {
-    return { text: "", stats: { semantic: 0, lessons: 0 } };
+    return { text: "", stats: { semantic: 0, lessons: 0 }, included: { semantic: [], lessons: [] } };
   }
-  let text = `<memory>
+  const text = capped(`<memory>
 ${sections.join("\n")}
 
 ${MEMORY_DRIFT_CAVEAT}
-</memory>`;
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>";
-  }
-  return { text, stats: { semantic: semanticCount, lessons: lessonCount } };
+</memory>`);
+  const included = { semantic: shownIn(text, semanticLines), lessons: shownIn(text, lessonLines) };
+  store.touchAccessed(freshSemantic.filter((r) => included.semantic.includes(semanticRecallId(r))).map((r) => r.key));
+  return { text, stats: { semantic: semanticCount, lessons: lessonCount }, included };
+}
+function lessonSections(lessons, sections) {
+  const tag = (l) => l.category !== "general" ? ` [${l.category}]` : "";
+  const corrections = lessons.filter((l) => l.negative).map((l) => ({ id: l.id, line: `DON'T: ${l.rule}${tag(l)}` }));
+  const positives = lessons.filter((l) => !l.negative).map((l) => ({ id: l.id, line: `${l.rule}${tag(l)}` }));
+  if (corrections.length > 0) sections.push(formatSection("Learned Corrections", corrections.map((l) => l.line)));
+  if (positives.length > 0) sections.push(formatSection("Validated Approaches", positives.map((l) => l.line)));
+  return [...corrections, ...positives];
+}
+function capped(text) {
+  return text.length > MAX_CONTEXT_CHARS ? text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>" : text;
+}
+function shownIn(text, lines) {
+  return lines.filter((l) => text.includes(`
+- ${l.line}
+`)).map((l) => l.id);
 }
 function getRelevantLessons(store, prompt, cwd) {
   const seen = /* @__PURE__ */ new Set();
@@ -566,40 +572,22 @@ function buildFallbackBlock(store, cwd) {
     semanticCount += tools.length;
   }
   const lessons = store.listLessons(void 0, 50, slug || void 0);
-  if (lessons.length > 0) {
-    const corrections = lessons.filter((l) => l.negative);
-    const positives = lessons.filter((l) => !l.negative);
-    if (corrections.length > 0) {
-      const formatted = corrections.map(
-        (l) => `DON'T: ${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Learned Corrections", formatted));
-    }
-    if (positives.length > 0) {
-      const formatted = positives.map(
-        (l) => `${l.rule}${l.category !== "general" ? ` [${l.category}]` : ""}`
-      );
-      sections.push(formatSection("Validated Approaches", formatted));
-    }
-    lessonCount = lessons.length;
-  }
+  lessonSections(lessons, sections);
+  lessonCount = lessons.length;
   const user = store.listSemantic("user.", 10);
   if (user.length > 0) {
     sections.push(formatSection("User", user.map(formatSemantic)));
     semanticCount += user.length;
   }
   if (sections.length === 0) {
-    return { text: "", stats: { semantic: 0, lessons: 0 } };
+    return { text: "", stats: { semantic: 0, lessons: 0 }, included: { semantic: [], lessons: [] } };
   }
-  let text = `<memory>
+  const text = capped(`<memory>
 ${sections.join("\n")}
 
 ${MEMORY_DRIFT_CAVEAT}
-</memory>`;
-  if (text.length > MAX_CONTEXT_CHARS) {
-    text = text.slice(0, MAX_CONTEXT_CHARS - 20) + "\n... (truncated)\n</memory>";
-  }
-  return { text, stats: { semantic: semanticCount, lessons: lessonCount } };
+</memory>`);
+  return { text, stats: { semantic: semanticCount, lessons: lessonCount }, included: { semantic: [], lessons: [] } };
 }
 var STALE_WARNING_DAYS = 30;
 var VERY_STALE_DAYS = 90;
@@ -1248,7 +1236,7 @@ function mergeMemorySettings(config, memorySettings) {
   if (typeof m.perTurnInjection === "boolean") {
     config.perTurnInjection = m.perTurnInjection;
   }
-  if (m.injectionMode === "system-prompt" || m.injectionMode === "context-hook") {
+  if (m.injectionMode === "system-prompt" || m.injectionMode === "message") {
     config.injectionMode = m.injectionMode;
   }
   if (typeof m.consolidationModel === "string" && m.consolidationModel.trim()) {
@@ -1307,6 +1295,19 @@ function readSettingsConfig(cwd) {
     }
   }
   return config;
+}
+var RECALL_MESSAGE_TYPE = "pi-memory-recall";
+function recalledInContext(sessionManager) {
+  const entries = sessionManager.buildContextEntries?.() ?? sessionManager.getBranch?.() ?? [];
+  const semantic = /* @__PURE__ */ new Set();
+  const lessons = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (entry.type !== "custom_message" || entry.customType !== RECALL_MESSAGE_TYPE) continue;
+    const ids = entry.details;
+    for (const id of ids?.semantic ?? []) semantic.add(id);
+    for (const id of ids?.lessons ?? []) lessons.add(id);
+  }
+  return { semantic, lessons };
 }
 function index_default(pi) {
   let store = null;
@@ -1406,7 +1407,6 @@ function index_default(pi) {
     if (semantic.length === 0) return lexical.slice(0, limit);
     return reciprocalRankFusion(lexical, semantic, (e) => e.key).slice(0, limit).map((r) => r.item);
   }
-  let pendingContextBlock = null;
   pi.on("session_start", async (_event, ctx) => {
     try {
       sessionCwd = ctx.cwd;
@@ -1479,39 +1479,16 @@ function index_default(pi) {
   pi.on("before_agent_start", async (event, ctx) => {
     if (!store) return;
     if (injectorConfig.perTurnInjection === false) return;
-    const { text } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
-    const mode = injectorConfig.injectionMode ?? "context-hook";
-    if (mode === "system-prompt") {
-      pendingContextBlock = null;
-      if (!text) return;
-      return { systemPrompt: `${event.systemPrompt}
+    if (injectorConfig.injectionMode === "system-prompt") {
+      const { text: text2 } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig);
+      return text2 ? { systemPrompt: `${event.systemPrompt}
 
-${text}` };
+${text2}` } : void 0;
     }
-    pendingContextBlock = text || null;
-    return;
-  });
-  pi.on("context", async (event, _ctx) => {
-    if (!store) return;
-    if (injectorConfig.perTurnInjection === false) return;
-    if ((injectorConfig.injectionMode ?? "context-hook") !== "context-hook") return;
-    if (!pendingContextBlock) return;
-    const msgs = event.messages;
-    if (!msgs || msgs.length === 0) return;
-    let idx = -1;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].role === "user") {
-        idx = i;
-        break;
-      }
-    }
-    if (idx === -1) return;
-    const recallMessage = {
-      role: "user",
-      content: pendingContextBlock,
-      timestamp: Date.now()
-    };
-    return { messages: [...msgs.slice(0, idx), recallMessage, ...msgs.slice(idx)] };
+    if (!event.prompt?.trim()) return;
+    const { text, included } = await buildContextBlock(store, ctx.cwd, event.prompt, injectorConfig, recalledInContext(ctx.sessionManager));
+    if (!text) return;
+    return { message: { customType: RECALL_MESSAGE_TYPE, content: text, display: false, details: included } };
   });
   pi.on("agent_end", async (event, _ctx) => {
     for (const msg of event.messages) {

@@ -2,6 +2,26 @@
 
 All notable changes to `@samfp/pi-memory`. Versions follow [semver](https://semver.org/).
 
+## [1.7.0] - 2026-11-11
+
+### Changed
+
+- **Per-turn memory is now a stored, hidden session message**
+  (`injectionMode: "message"`, customType `pi-memory-recall`). The 1.6
+  `context-hook` default spliced the block in front of the latest user message
+  on every request and never stored it, so each new turn rewrote earlier
+  history. That missed the prompt cache from the system prompt onward on every
+  turn, and on Claude Fable 5.2 (and other models with preserved thinking)
+  Bedrock dropped earlier reasoning blocks. History is now append-only.
+- Each recall message holds only memory the active context does not already
+  carry (tracked in the message `details`). A fact comes back when its value
+  changes or when compaction removes the message that carried it. Entries cut
+  by the 8KB cap are not counted as recalled.
+- Runs started by an extension message, with no user prompt, add no memory.
+  They previously got the full fallback dump.
+- `injectionMode: "context-hook"` is no longer a mode; the value is read as
+  the default.
+
 ## [1.6.1] - 2026-10-09
 
 ### Fixed
